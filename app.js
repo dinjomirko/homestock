@@ -1,8 +1,11 @@
 import {
   parseCommand, resolveActions, matchItem, matchExact, guessLocation, guessEmoji, parsePack, parseListLines,
   suggestShelfLife, openLife, isoDate, DEFAULT_LOCATIONS,
-} from './parser.js?v=24';
-import { initSync, pushSoon, syncInfo, createHousehold, joinHousehold, leaveHousehold } from './sync.js?v=24';
+} from './parser.js?v=25';
+import {
+  initSync, pushSoon, syncInfo, createHousehold, joinHousehold, leaveHousehold, authenticate, useHousehold, signOut,
+  removeMember, newJoinCode, renameMe,
+} from './sync.js?v=25';
 
 const APP_VERSION = new URL(import.meta.url).searchParams.get('v') || 'dev';
 const STORAGE_KEY = 'homestock.v1';
@@ -32,7 +35,7 @@ let state = load(STORAGE_KEY, { items: [] });
 const prefs = { scanMode: 'add', sound: true, stores: ['Costco', 'Aldi', 'Target', 'Walmart'], places: [...DEFAULT_LOCATIONS], ...load(PREFS_KEY, {}) };
 delete prefs.shopStore; // the store filter used to be remembered between launches; now it isn't
 // shopStore: the store picked at the top of the shopping list, for this visit only.
-const ui = { view: 'stock', loc: 'All', q: '', bought: new Map(), flash: null, editor: null, paste: null, shopStore: 'all' };
+const ui = { view: 'stock', loc: 'All', q: '', bought: new Map(), flash: null, editor: null, paste: null, account: null, shopStore: 'all' };
 const undoStack = [];
 
 function load(key, fallback) {
@@ -229,7 +232,7 @@ function ago(ts) {
 // ---------- Rendering ----------
 
 function render() {
-  document.body.classList.toggle('editing', Boolean(ui.editor || ui.paste));
+  document.body.classList.toggle('editing', Boolean(ui.editor || ui.paste || ui.account));
   document.querySelectorAll('.tab').forEach((t) => {
     t.classList.toggle('on', t.dataset.view === ui.view);
     t.setAttribute('aria-current', t.dataset.view === ui.view ? 'page' : 'false');
@@ -242,6 +245,10 @@ function render() {
   if (ui.editor) return; // the editor page owns the screen while it's open
   if (ui.paste) {
     if (!$('#pasteForm')) $('#main').innerHTML = renderPaste();
+    return;
+  }
+  if (ui.account) {
+    if (!$('#accountForm')) $('#main').innerHTML = renderAccount();
     return;
   }
   $('#main').innerHTML = ui.view === 'stock' ? renderStock() : renderShop();
@@ -1347,28 +1354,70 @@ const SYNC_WORDS = { synced: 'Up to date', connecting: 'Connecting…', offline:
 
 function openHousehold() {
   const info = syncInfo();
-  let body;
+  const acct = info.account;
+  let body = '';
   if (!info.configured) {
     body = '<p class="note">Household sharing isn’t connected to its cloud database yet.</p>';
-  } else if (!info.joined) {
-    body = `<p class="note">Share one stock and shopping list with everyone in your home. Changes show up on every phone within a second or two, and work offline too.</p>
-      <div class="row-actions"><button class="btn" data-hh="join">Join with a code</button><button class="btn primary" data-hh="create">Start a household</button></div>`;
+  } else if (!acct) {
+    body = `<p class="note">Share one stock and shopping list with everyone in your home. Sign in or create an account first; it keeps your household private to the people you let in.</p>
+      <div class="row-actions"><button class="btn" data-account="in">Sign in</button><button class="btn primary" data-account="up">Create account</button></div>`;
   } else {
-    body = `<p class="note">${info.members.length ? `Shared with ${info.members.map(esc).join(', ')}.` : 'Shared household.'} ${esc(SYNC_WORDS[info.status] || '')}</p>
-      <div class="card hh-code"><span class="label">Household code</span><b>${esc(info.code)}</b>
-        <p>Others join from ⋯ → Household sharing → Join with a code. Keep it somewhere safe; anyone with it can join.</p>
-        <button class="btn small" data-hh="copy">Copy code</button></div>
-      <button class="danger" data-hh="leave">Leave household</button>`;
+    body = acct.guest
+      ? `<div class="card guard"><h3>Protect your household</h3>
+          <p>You joined before accounts existed. Create an account (or sign in to one) so you can get back in on any phone, and so only people with accounts can join.</p>
+          <div class="row-actions"><button class="btn" data-account="in">I have an account</button><button class="btn primary" data-account="up">Create account</button></div></div>`
+      : `<p class="note">Signed in as <b>${esc(acct.email)}</b>. <button class="link small" data-hh="signout">Sign out</button></p>`;
+    if (!info.joined) {
+      body += `<p class="note">Start a household to share your stock and list, or join one with the code someone gave you.</p>
+        <div class="row-actions"><button class="btn" data-hh="join">Join with a code</button><button class="btn primary" data-hh="create">Start a household</button></div>`;
+    } else {
+      body += `<p class="note">${esc(SYNC_WORDS[info.status] || '')}</p>
+        <ul class="list members">${info.members.map((m) => `<li class="item">
+          <div class="info"><div class="name">${esc(m.name)}${m.id === info.me ? ' (you)' : ''}</div><div class="meta">${m.role === 'owner' ? 'Owner' : 'Member'}${m.id === info.me ? ' · <button class="link small" data-hh="rename">Change my name</button>' : ''}</div></div>
+          ${info.owner && m.id !== info.me ? `<button class="remove" data-hh-remove="${esc(m.id)}" aria-label="Remove ${esc(m.name)}"><svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17"/></svg></button>` : ''}
+        </li>`).join('')}</ul>
+        <div class="card hh-code"><span class="label">Household code</span><b>${esc(info.code)}</b>
+          <p>Others join from ⋯ → Household sharing → Join with a code, after signing in.${info.owner ? ' Give it only to people you want in; you can replace it any time.' : ''}</p>
+          <div class="row-actions"><button class="btn small" data-hh="copy">Copy code</button>${info.owner ? '<button class="btn small" data-hh="newcode">New code</button>' : ''}</div></div>
+        <button class="danger" data-hh="leave">Leave household</button>`;
+    }
   }
   openSheet(`<div class="sheet-head"><h2>Household sharing</h2><button class="link" data-close>Done</button></div>${body}`);
 }
 
-async function householdAction(act) {
+async function householdAction(act, id) {
   const info = syncInfo();
   try {
     if (act === 'copy') {
       await navigator.clipboard?.writeText(info.code);
       return toast('Code copied');
+    }
+    if (act === 'signout') {
+      if (!confirm('Sign out? This phone keeps its copy of everything but stops syncing until you sign in again.')) return;
+      await signOut();
+      toast('Signed out');
+      return openHousehold();
+    }
+    if (act === 'remove') {
+      const who = info.members.find((m) => m.id === id);
+      if (!confirm(`Remove ${who?.name || 'this person'} from the household? They’ll keep their phone’s copy but stop seeing changes. Make a new code too if they have it.`)) return;
+      await removeMember(id);
+      toast(`Removed ${who?.name || 'them'}`);
+      return openHousehold();
+    }
+    if (act === 'rename') {
+      const name = prompt('Your first name — shown to others in the household', info.name || '')?.trim();
+      if (!name) return;
+      if (/^[0-9a-f]{8}$/i.test(name)) return toast('That looks like the household code — enter your first name instead.');
+      await renameMe(name);
+      toast('Name changed');
+      return openHousehold();
+    }
+    if (act === 'newcode') {
+      if (!confirm('Make a new code? The current one stops working; people already in stay in.')) return;
+      const code = await newJoinCode();
+      toast(`New code: ${code}`);
+      return openHousehold();
     }
     if (act === 'leave') {
       if (!confirm('Leave the household? This phone keeps a copy of everything but stops syncing.')) return;
@@ -1376,15 +1425,17 @@ async function householdAction(act) {
       toast('Left the household');
       return openHousehold();
     }
+    // Code first, then name (asking for the name first got codes typed into the name box).
+    const code = act === 'join' ? prompt('Household code (8 letters and numbers)')?.trim() : null;
+    if (act === 'join' && !code) return;
     const name = prompt('Your first name — shown to others in the household', info.name || '')?.trim();
     if (!name) return;
+    if (/^[0-9a-f]{8}$/i.test(name)) return toast('That looks like the household code — enter your first name instead.');
     if (act === 'create') {
       toast('Setting up…');
-      const code = await createHousehold(name);
-      toast(`Household started. Code: ${code}`);
+      const newCode = await createHousehold(name);
+      toast(`Household started. Code: ${newCode}`);
     } else {
-      const code = prompt('Household code (8 letters and numbers)')?.trim();
-      if (!code) return;
       const keepMine = state.items.length ? confirm(`Also add the ${state.items.length} items on this phone to the household? Cancel to use only the household’s items.`) : false;
       toast('Joining…');
       await joinHousehold(code, name, keepMine);
@@ -1396,6 +1447,87 @@ async function householdAction(act) {
     toast(err.message || 'Couldn’t reach the household — check your connection.');
   }
 }
+
+// ---------- Sign in / create account (a full page, so the iPhone keyboard behaves) ----------
+
+function openAccount(mode) {
+  closeSheet();
+  ui.account = { mode };
+  render();
+  scrollTo(0, 0);
+}
+
+function closeAccount() {
+  ui.account = null;
+  render();
+}
+
+function renderAccount() {
+  const up = ui.account.mode === 'up';
+  const guest = syncInfo().account?.guest;
+  return `<form class="form editor" id="accountForm" novalidate>
+    <div class="page-head">
+      <button type="button" class="link" data-account-act="cancel">Cancel</button>
+      <h2>${up ? 'Create account' : 'Sign in'}</h2>
+      <button type="submit" class="link strong">${up ? 'Create' : 'Sign in'}</button>
+    </div>
+    <p class="note" style="margin-top:14px">${guest
+      ? 'Your household and everything in it moves to this account; nothing needs setting up again.'
+      : up ? 'An account keeps your household private and lets you sign in on any phone.' : 'Signing in brings back your household on this phone.'}</p>
+    ${up ? `<label>First name<input name="name" autocomplete="given-name" value="${esc(syncInfo().name || '')}" placeholder="Shown to others in your household"></label>` : ''}
+    <label>Email<input name="email" type="email" inputmode="email" autocomplete="username" autocapitalize="off" spellcheck="false" placeholder="you@example.com"></label>
+    <label>Password<input name="password" type="password" autocomplete="${up ? 'new-password' : 'current-password'}" minlength="6" placeholder="${up ? 'At least 6 characters' : ''}" enterkeyhint="go"></label>
+    <p class="note error" id="accountError" role="alert"></p>
+    <button class="primary" type="submit">${up ? 'Create account' : 'Sign in'}</button>
+    <button type="button" class="link" data-account-act="switch" style="width:100%">${up ? 'Already have an account? Sign in' : 'New here? Create an account'}</button>
+    ${up ? '' : '<p class="note" style="text-align:center">Forgot your password? Ask your household’s owner to remove your old account, then create a new one and join with the code.</p>'}
+  </form>`;
+}
+
+async function submitAccount(form) {
+  const up = ui.account.mode === 'up';
+  const email = form.email.value.trim();
+  const password = form.password.value;
+  const name = up ? form.name.value.trim() : '';
+  const show = (msg) => ($('#accountError', form).textContent = msg);
+  if (up && !name) return show('Add your first name.');
+  if (!/^\S+@\S+\.\S+$/.test(email)) return show('Add your email address.');
+  if (password.length < 6) return show('Use a password of at least 6 characters.');
+  const submit = form.querySelector('.primary');
+  submit.disabled = true;
+  show('');
+  try {
+    const wasJoined = syncInfo().joined;
+    const household = await authenticate(up ? 'up' : 'in', email, password, name);
+    document.activeElement?.blur?.();
+    ui.account = null;
+    if (household && !wasJoined) {
+      const keepMine = state.items.length ? confirm(`Also add the ${state.items.length} items on this phone to your household? Cancel to use only the household’s items.`) : false;
+      await useHousehold(household, keepMine);
+    }
+    render();
+    toast(up ? 'Account created' : 'Signed in');
+    openHousehold();
+  } catch (err) {
+    submit.disabled = false;
+    show(err.message || 'Couldn’t reach the server — check your connection.');
+  }
+}
+
+$('#main').addEventListener('click', (e) => {
+  if (!e.target.closest('#accountForm')) return;
+  const act = e.target.closest('[data-account-act]')?.dataset.accountAct;
+  if (act === 'cancel') closeAccount();
+  if (act === 'switch') {
+    ui.account.mode = ui.account.mode === 'up' ? 'in' : 'up';
+    $('#main').innerHTML = renderAccount();
+  }
+});
+$('#main').addEventListener('submit', (e) => {
+  if (e.target.id !== 'accountForm') return;
+  e.preventDefault();
+  submitAccount(e.target);
+});
 
 function persistOnly() {
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch {}
@@ -1420,7 +1552,7 @@ function openSiriSetup() {
     </ol>
     <pre class="share-preview">${esc(link)}</pre>
     <div class="row-actions"><button class="btn primary" data-siri="copy">Copy link</button></div>
-    <p class="note">Then say “Hey Siri, Key Record” and speak, e.g. “used two cans of tomatoes”. It opens in Safari, so first open Key Record in Safari once and join your household there (⋯ → Household sharing) so both stay in step.</p>`);
+    <p class="note">Then say “Hey Siri, Key Record” and speak, e.g. “used two cans of tomatoes”. It opens in Safari, so first open Key Record in Safari once and sign in there (⋯ → Household sharing) so both stay in step.</p>`);
 }
 
 // Run a command passed in the link by the Siri shortcut.
@@ -2422,6 +2554,10 @@ $('#sheet').addEventListener('click', (e) => {
   }
   const hh = e.target.closest('[data-hh]')?.dataset.hh;
   if (hh) return householdAction(hh);
+  const removeId = e.target.closest('[data-hh-remove]')?.dataset.hhRemove;
+  if (removeId) return householdAction('remove', removeId);
+  const acct = e.target.closest('[data-account]')?.dataset.account;
+  if (acct) return openAccount(acct);
   if (e.target.closest('[data-siri="copy"]')) {
     navigator.clipboard?.writeText(`${location.origin}${location.pathname}?say=`).then(() => toast('Link copied'), () => {});
     return;
@@ -2560,7 +2696,7 @@ Promise.race([
       try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch {}
     },
     persist: persistOnly,
-    onRemote: () => !ui.editor && !ui.paste && !drag?.active && !swipe?.active && render(),
+    onRemote: () => !ui.editor && !ui.paste && !ui.account && !drag?.active && !swipe?.active && render(),
     onStatus: () => {},
   }).catch(() => {}),
   new Promise((r) => setTimeout(r, 5000)),

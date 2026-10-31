@@ -498,3 +498,10 @@ body { font-variant-numeric: lining-nums; }
 .hh-code { text-align: center; }
 .hh-code b { display: block; font-family: var(--serif); font-size: 34px; letter-spacing: .18em; margin: 4px 0 6px; font-variant-numeric: lining-nums; }
 .hh-code p { margin: 0 0 10px; }
+
+/* Household and account */
+.guard { margin-top: 10px; }
+.guard h3 { font-family: var(--serif); }
+.members { margin-top: 10px; }
+.members .item { min-height: 52px; }
+.note.error { color: var(--danger); min-height: 1em; }

@@ -4,7 +4,7 @@
 // in the background; changes from others arrive live and replace the local copy of an item
 // when they're newer. Each item is one row, so two people editing different things never
 // clash; the same item edited on two phones keeps whichever change came last.
-import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js?v=24';
+import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js?v=25';
 
 const LIB = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm';
 const META_KEY = 'homestock.sync';
@@ -16,7 +16,8 @@ let pushing = false;
 let again = false;
 let retryTimer = 0;
 let status = 'off'; // off | connecting | synced | offline
-let members = [];
+let members = []; // [{ id, name, role }]
+let user = null; // the signed-in account (or a guest from before accounts existed)
 const meta = loadMeta(); // { householdId, code, name, sent: { [itemId]: fingerprint }, settingsSent }
 
 function loadMeta() {
@@ -40,7 +41,27 @@ const stable = (v) =>
 const print = (obj) => JSON.stringify(stable(obj));
 
 export const syncConfigured = () => Boolean(SUPABASE_URL && SUPABASE_ANON_KEY);
-export const syncInfo = () => ({ configured: syncConfigured(), joined: Boolean(meta.householdId), code: meta.code, name: meta.name, status, members });
+export const syncInfo = () => ({
+  configured: syncConfigured(),
+  joined: Boolean(meta.householdId),
+  code: meta.code,
+  name: meta.name,
+  status,
+  members,
+  account: user ? { email: user.email || '', guest: Boolean(user.is_anonymous) } : null,
+  me: user?.id,
+  owner: members.some((m) => m.id === user?.id && m.role === 'owner'),
+});
+
+const FRIENDLY = [
+  [/invalid login credentials/i, 'That email and password don’t match an account.'],
+  [/already registered|already been registered/i, 'There’s already an account with that email — sign in instead.'],
+  [/password should be at least/i, 'Use a password of at least 6 characters.'],
+  [/unable to validate email|invalid format/i, 'That doesn’t look like an email address.'],
+  [/signups not allowed/i, 'New accounts are turned off for this app.'],
+  [/rate limit/i, 'Too many tries — wait a minute and try again.'],
+];
+const friendly = (msg) => FRIENDLY.find(([re]) => re.test(msg))?.[1] || msg;
 
 function setStatus(s) {
   status = s;
@@ -57,10 +78,90 @@ async function client() {
 async function signedIn() {
   const c = await client();
   const { data } = await c.auth.getSession();
-  if (data.session) return c;
-  const { error } = await c.auth.signInAnonymously();
-  if (error) throw new Error(error.message.includes('Anonymous') ? 'Anonymous sign-ins are turned off in Supabase.' : error.message);
+  if (!data.session) throw new Error('Sign in first.');
+  user = data.session.user;
   return c;
+}
+
+const hasSavedSession = () => {
+  try { return Boolean(localStorage.getItem('homestock.auth')); } catch { return false; }
+};
+
+// Create an account or sign in. A guest on this phone (from before accounts) hands its household
+// and role over to the account, so nothing has to be set up again. Returns the account's
+// household, if it has one.
+export async function authenticate(kind, email, password, name = '') {
+  const { createClient } = await import(LIB);
+  const tmp = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false, storageKey: 'homestock.auth.tmp' },
+  });
+  const { data, error } = kind === 'up'
+    ? await tmp.auth.signUp({ email, password, options: { data: { name } } })
+    : await tmp.auth.signInWithPassword({ email, password });
+  if (error) throw new Error(friendly(error.message));
+  if (!data.session) throw new Error('Check your email to confirm the account, then sign in.');
+  const c = await client();
+  const current = (await c.auth.getSession()).data.session;
+  if (current?.user?.is_anonymous && current.user.id !== data.user.id) {
+    const { error: handOver } = await c.rpc('hand_over_membership', { new_user: data.user.id });
+    if (handOver) throw new Error(friendly(handOver.message));
+  }
+  const { error: switchError } = await c.auth.setSession({ access_token: data.session.access_token, refresh_token: data.session.refresh_token });
+  if (switchError) throw new Error(friendly(switchError.message));
+  user = data.user;
+  const { data: rows } = await c.from('members').select('household_id, name, households(code)').eq('user_id', user.id).order('joined_at');
+  const h = rows?.[0];
+  if (h && h.household_id === meta.householdId) await loadMembers().catch(() => {});
+  return h ? { householdId: h.household_id, code: h.households.code, name: h.name || name } : null;
+}
+
+// After signing in on a phone that isn't in the household yet: start syncing it.
+export async function useHousehold(h, keepMine) {
+  Object.assign(meta, { householdId: h.householdId, code: h.code, name: h.name, sent: {}, settingsSent: null });
+  saveMeta();
+  if (!keepMine) app.setItems([]);
+  await pull();
+  listen();
+  watchConnection();
+}
+
+// Stop syncing on this phone and sign out; this phone keeps its copy of everything.
+export async function signOut() {
+  channel?.unsubscribe();
+  channel = null;
+  try { await (await client()).auth.signOut(); } catch {}
+  for (const k of ['householdId', 'code', 'settingsSent']) delete meta[k];
+  meta.sent = {};
+  saveMeta();
+  user = null;
+  members = [];
+  setStatus('off');
+}
+
+export async function renameMe(name) {
+  const c = await signedIn();
+  const { error } = await c.from('members').update({ name }).eq('household_id', meta.householdId).eq('user_id', user.id);
+  if (error) throw new Error(friendly(error.message));
+  meta.name = name;
+  saveMeta();
+  await loadMembers();
+}
+
+// Owner only.
+export async function removeMember(id) {
+  const c = await signedIn();
+  const { error } = await c.rpc('remove_member', { h: meta.householdId, member: id });
+  if (error) throw new Error(friendly(error.message));
+  await loadMembers();
+}
+
+export async function newJoinCode() {
+  const c = await signedIn();
+  const { data, error } = await c.rpc('new_join_code', { h: meta.householdId });
+  if (error) throw new Error(friendly(error.message));
+  meta.code = data;
+  saveMeta();
+  return data;
 }
 
 // app: { items(), setItems(items), settings(), applySettings(data), persist(), onRemote(), onStatus(s) }
@@ -74,7 +175,11 @@ function watchConnection() {
 
 export async function initSync(hooks) {
   app = hooks;
-  if (!syncConfigured() || !meta.householdId) return;
+  if (!syncConfigured() || !hasSavedSession()) return;
+  try {
+    user = (await (await client()).auth.getSession()).data.session?.user || null;
+  } catch {}
+  if (!meta.householdId) return;
   watchConnection();
   try {
     setStatus('connecting');
@@ -117,9 +222,7 @@ export async function joinHousehold(code, name, keepMine) {
 
 export async function leaveHousehold() {
   try {
-    const c = await client();
-    const { data } = await c.auth.getUser();
-    await c.from('members').delete().eq('household_id', meta.householdId).eq('user_id', data.user.id);
+    await (await signedIn()).rpc('leave_household', { h: meta.householdId });
   } catch {}
   channel?.unsubscribe();
   channel = null;
@@ -131,8 +234,8 @@ export async function leaveHousehold() {
 }
 
 async function loadMembers() {
-  const { data } = await sb.from('members').select('name').eq('household_id', meta.householdId).order('joined_at');
-  members = (data || []).map((m) => m.name || 'Someone');
+  const { data } = await sb.from('members').select('user_id, name, role').eq('household_id', meta.householdId).order('joined_at');
+  members = (data || []).map((m) => ({ id: m.user_id, name: m.name || 'Someone', role: m.role }));
 }
 
 // Bring in everything from the household, keeping whichever copy of each item is newer.
