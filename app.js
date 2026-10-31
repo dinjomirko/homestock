@@ -18,7 +18,7 @@ const buzz = (ms = 30) => navigator.vibrate?.(ms);
 
 let state = load(STORAGE_KEY, { items: [] });
 const prefs = { scanMode: 'add', sound: true, ...load(PREFS_KEY, {}) };
-const ui = { view: 'stock', loc: 'All', q: '', bought: new Map(), flash: null };
+const ui = { view: 'stock', loc: 'All', q: '', bought: new Map(), flash: null, editor: null };
 const undoStack = [];
 
 function load(key, fallback) {
@@ -127,6 +127,7 @@ function ago(ts) {
 // ---------- Rendering ----------
 
 function render() {
+  document.body.classList.toggle('editing', Boolean(ui.editor));
   document.querySelectorAll('.tab').forEach((t) => {
     t.classList.toggle('on', t.dataset.view === ui.view);
     t.setAttribute('aria-current', t.dataset.view === ui.view ? 'page' : 'false');
@@ -136,6 +137,7 @@ function render() {
   const shopCount = shoppingItems().filter((i) => !ui.bought.has(i.id)).length;
   $('#shopBadge').hidden = !shopCount;
   $('#shopBadge').textContent = shopCount;
+  if (ui.editor) return; // the editor page owns the screen while it's open
   $('#main').innerHTML = ui.view === 'stock' ? renderStock() : renderShop();
   ui.flash = null;
 }
@@ -454,78 +456,115 @@ document.addEventListener('click', (e) => {
   });
 });
 
-// Resolves with the saved item, or null if cancelled.
-function openEditor(item, { isNew = false, hint = '' } = {}) {
+// The item editor is an ordinary page rather than an overlay: on iPhone, text fields inside
+// fixed panels end up behind the keyboard, while on a normal page Safari scrolls them into view.
+// Resolves with { item, note } when saved, or null when cancelled.
+function openEditor(item, opts = {}) {
   return new Promise((resolve) => {
-    let saved = null;
-    const lowOpts = [['', 'Never'], ...[0, 1, 2, 3, 5, 10].map((n) => [n, n === 0 ? 'When out' : `${n} left`])];
-    openSheet(`
-      <form class="form" id="editForm">
-        <div class="sheet-head sticky"><button type="button" class="link" data-close>Cancel</button><h2>${isNew ? 'New item' : 'Edit item'}</h2><button type="submit" class="link strong">${isNew ? 'Add' : 'Save'}</button></div>
-        ${hint ? `<p class="note">${esc(hint)}</p>` : ''}
-        ${item.image ? `<img class="hero" src="${esc(item.image)}" alt="">` : ''}
-        <label>Name<input name="name" required value="${esc(item.name)}" placeholder="e.g. Paper towels" autocomplete="off" enterkeyhint="done"></label>
-        <div class="row2">
-          <label>How many
-            <div class="stepper big"><button type="button" data-step="-1" aria-label="One less">−</button><input name="qty" type="number" inputmode="decimal" step="any" min="0" value="${item.qty}" aria-label="Quantity"><button type="button" data-step="1" aria-label="One more">+</button></div>
-          </label>
-          <label>Counted in<input name="unit" value="${esc(item.unit)}" placeholder="rolls, cans…" autocapitalize="off" autocomplete="off"></label>
-        </div>
-        <span class="label">Kept in</span>
-        ${locationPicker(item.location)}
-        <label>Use by <span style="font-weight:400">(optional)</span><input name="useBy" type="date" value="${esc(item.useBy || '')}"></label>
-        <details><summary>Shopping & scanning</summary>
-          <div class="row2">
-            <label>Add to list at
-              <select name="low">${lowOpts.map(([v, t]) => `<option value="${v}" ${String(item.low ?? '') === String(v) ? 'selected' : ''}>${t}</option>`).join('')}</select>
-            </label>
-            <label>Each scan adds<input name="scanQty" type="number" inputmode="numeric" min="1" value="${item.scanQty || 1}"></label>
-          </div>
-          <label>Brand<input name="brand" value="${esc(item.brand)}" autocomplete="off"></label>
-          <label>Barcode<input name="barcode" inputmode="numeric" value="${esc(item.barcode)}" autocomplete="off"></label>
-        </details>
-        ${isNew ? '' : `<button type="button" class="danger" data-delete>Delete item</button>
-          <p class="note" style="text-align:center">Last changed ${ago(item.updated)}</p>`}
-      </form>`, () => resolve(saved));
-
-    const form = $('#editForm');
-    form.addEventListener('click', (e) => {
-      const step = e.target.closest('[data-step]');
-      if (step) form.qty.value = Math.max(0, round((parseFloat(form.qty.value) || 0) + Number(step.dataset.step)));
-      if (e.target.closest('[data-delete]') && confirm(`Delete ${item.name}?`)) {
-        checkpoint();
-        state.items = state.items.filter((i) => i.id !== item.id);
-        save();
-        closeSheet();
-        toast(`Deleted ${item.name}`, { undo: true });
-      }
-    });
-    form.addEventListener('submit', (e) => {
-      e.preventDefault();
-      checkpoint();
-      Object.assign(item, {
-        name: form.name.value.trim(),
-        qty: Math.max(0, parseFloat(form.qty.value) || 0),
-        unit: singularUnit(form.unit.value),
-        location: form.location.value,
-        useBy: form.useBy.value,
-        low: form.low.value === '' ? null : Number(form.low.value),
-        scanQty: Math.max(1, parseInt(form.scanQty.value, 10) || 1),
-        brand: form.brand.value.trim(),
-        barcode: normCode(form.barcode.value),
-        updated: Date.now(),
-      });
-      document.activeElement?.blur();
-      if (item.qty > (item.low ?? -1)) item.need = false;
-      if (isNew) state.items.push(item);
-      saved = item;
-      ui.flash = item.id;
-      save();
-      closeSheet();
-      if ($('#scanner').hidden) toast(isNew ? `Added ${item.name}` : 'Saved', { undo: true });
-    });
+    if (ui.editor) ui.editor.resolve(null);
+    ui.editor = { item, ...opts, resolve, scrollY: window.scrollY };
+    render();
+    $('#main').innerHTML = renderEditor();
+    window.scrollTo(0, 0);
   });
 }
+
+function closeEditor(saved = null) {
+  const ed = ui.editor;
+  if (!ed) return;
+  ui.editor = null;
+  document.activeElement?.blur?.();
+  render();
+  window.scrollTo(0, ed.fromScan ? 0 : ed.scrollY);
+  ed.resolve(saved);
+}
+
+function renderEditor() {
+  const { item, isNew, hint, similar, fromScan } = ui.editor;
+  const lowOpts = [['', 'Never'], ...[0, 1, 2, 3, 5, 10].map((n) => [n, n === 0 ? 'When out' : `${n} left`])];
+  return `<form class="form editor" id="editForm" novalidate>
+    <div class="page-head">
+      <button type="button" class="link" data-edit="cancel">${fromScan && isNew ? 'Skip' : 'Cancel'}</button>
+      <h2>${isNew ? 'New item' : 'Edit item'}</h2>
+      <button type="submit" class="link strong">Save</button>
+    </div>
+    ${item.image || hint ? `<div class="found">${item.image ? `<img src="${esc(item.image)}" alt="">` : ''}${hint ? `<p class="note">${esc(hint)}</p>` : ''}</div>` : ''}
+    ${similar ? `<div class="suggest"><span>Is this your <b>${esc(similar.name)}</b>?</span>
+      <button type="button" class="btn small primary" data-edit="link" data-id="${similar.id}">Yes, same thing</button></div>` : ''}
+    <label>Name<input name="name" value="${esc(item.name)}" placeholder="What is it?" autocomplete="off" enterkeyhint="done"></label>
+    <span class="label">How many</span>
+    <div class="qty-row">
+      <div class="stepper big"><button type="button" data-step="-1" aria-label="One less">−</button><input name="qty" type="number" inputmode="decimal" step="any" min="0" value="${item.qty}" aria-label="Quantity"><button type="button" data-step="1" aria-label="One more">+</button></div>
+      ${unitPicker(item.unit)}
+    </div>
+    <span class="label">Kept in</span>
+    ${locationPicker(item.location)}
+    <label>Use by <span style="font-weight:400">(optional)</span><input name="useBy" type="date" value="${esc(item.useBy || '')}"></label>
+    <details><summary>Shopping & scanning</summary>
+      <div class="row2">
+        <label>Add to list at
+          <select name="low">${lowOpts.map(([v, t]) => `<option value="${v}" ${String(item.low ?? '') === String(v) ? 'selected' : ''}>${t}</option>`).join('')}</select>
+        </label>
+        <label>Each scan adds<input name="scanQty" type="number" inputmode="numeric" min="1" value="${item.scanQty || 1}"></label>
+      </div>
+      <label>Brand<input name="brand" value="${esc(item.brand)}" autocomplete="off"></label>
+      <label>Barcode<input name="barcode" inputmode="numeric" value="${esc(item.barcode)}" autocomplete="off"></label>
+    </details>
+    <button class="primary" type="submit">${fromScan ? 'Save & keep scanning' : isNew ? 'Add item' : 'Save'}</button>
+    ${isNew ? '' : `<button type="button" class="danger" data-edit="delete">Delete item</button>
+      <p class="note" style="text-align:center">Last changed ${ago(item.updated)}</p>`}
+  </form>`;
+}
+
+$('#main').addEventListener('click', (e) => {
+  const form = e.target.closest('#editForm');
+  if (!form || !ui.editor) return;
+  const { item } = ui.editor;
+  const step = e.target.closest('[data-step]');
+  if (step) form.qty.value = Math.max(0, round((parseFloat(form.qty.value) || 0) + Number(step.dataset.step)));
+  const act = e.target.closest('[data-edit]')?.dataset.edit;
+  if (act === 'cancel') closeEditor(null);
+  if (act === 'link') linkScannedTo(byId(e.target.closest('[data-id]').dataset.id));
+  if (act === 'delete' && confirm(`Delete ${item.name}?`)) {
+    checkpoint();
+    state.items = state.items.filter((i) => i.id !== item.id);
+    save();
+    closeEditor(null);
+    toast(`Deleted ${item.name}`, { undo: true });
+  }
+});
+
+$('#main').addEventListener('submit', (e) => {
+  const form = e.target;
+  if (form.id !== 'editForm' || !ui.editor) return;
+  e.preventDefault();
+  const { item, isNew, fromScan } = ui.editor;
+  const name = form.name.value.trim();
+  if (!name) {
+    form.name.focus();
+    form.name.placeholder = 'Give it a name first';
+    return;
+  }
+  checkpoint();
+  Object.assign(item, {
+    name: sentenceCase(name),
+    qty: Math.max(0, parseFloat(form.qty.value) || 0),
+    unit: singularUnit(form.unit.value),
+    location: form.location.value,
+    useBy: form.useBy.value,
+    low: form.low.value === '' ? null : Number(form.low.value),
+    scanQty: Math.max(1, parseInt(form.scanQty.value, 10) || 1),
+    brand: form.brand.value.trim(),
+    barcode: normCode(form.barcode.value),
+    updated: Date.now(),
+  });
+  if (item.qty > (item.low ?? -1)) item.need = false;
+  if (isNew) state.items.push(item);
+  ui.flash = item.id;
+  save();
+  closeEditor({ item, note: isNew ? `New · ${qtyText(item)}` : 'Saved' });
+  if (!fromScan) toast(isNew ? `Added ${item.name}` : 'Saved', { undo: true });
+});
 
 function openMenu() {
   openSheet(`
@@ -767,8 +806,7 @@ async function openScanner() {
   $('#scanner').hidden = false;
   document.body.style.overflow = 'hidden';
   $('#scanCard').innerHTML = '';
-  $('#manualCode').hidden = true;
-  $('#typeCodeBtn').hidden = false;
+  $('#typeCodeBtn').classList.remove('prominent');
   setScanMode(prefs.scanMode);
   try {
     audioCtx ||= new (window.AudioContext || window.webkitAudioContext)();
@@ -791,6 +829,7 @@ async function startCamera() {
   });
   if ($('#scanner').hidden) return stream.getTracks().forEach((t) => t.stop());
   cam.stream = stream;
+  cam.hasCamera = true;
   cam.track = stream.getVideoTracks()[0];
   const video = $('#camera');
   video.srcObject = stream;
@@ -984,13 +1023,20 @@ async function closeScanner() {
   $('#scanner').hidden = true;
   $('#scanCard').innerHTML = '';
   document.body.style.overflow = '';
-  if (!$('#sheet').hidden) closeSheet();
   render();
 }
 
 function showManual() {
-  $('#manualCode').hidden = false;
-  $('#typeCodeBtn').hidden = true;
+  $('#typeCodeBtn').classList.add('prominent');
+}
+
+// The system prompt handles the keyboard better than a field inside the camera screen.
+function typeBarcode() {
+  const code = normCode(prompt('Type the barcode number') || '');
+  if (!code) return;
+  cam.lastCode = code;
+  cam.lastSeen = performance.now();
+  handleCode(code);
 }
 
 async function handleCode(code) {
@@ -1077,9 +1123,9 @@ async function quickAdd(code) {
   pauseScanning();
   const token = ++lookupToken;
   $('#scanCard').innerHTML = `
-    <div class="quick"><div class="top-row"><div class="thumb" aria-hidden="true">🔎</div>
-      <div style="flex:1"><h3>Looking it up…</h3><div class="skeleton" style="margin-top:10px;width:70%"></div></div></div>
-      <div class="row-actions"><button class="btn" data-quick="skip">Cancel</button></div></div>`;
+    <div class="result"><div class="thumb" aria-hidden="true">🔎</div>
+      <div class="info"><div class="name">Looking it up…</div><div class="skeleton" style="margin-top:8px;width:70%"></div></div></div>
+    <div class="result-actions"><button class="btn" data-scan="cancel">Cancel</button></div>`;
   const info = await lookupBarcode(code);
   if (token !== lookupToken) return;
 
@@ -1094,91 +1140,62 @@ async function quickAdd(code) {
     scanQty: pack?.count || 1,
     qty: prefs.scanMode === 'add' ? pack?.count || 1 : 0,
   });
-  const similar = findSimilar(info);
-  const found = info ? [info.brand, info.size].filter(Boolean).join(' · ') || 'Found it' : '';
-  $('#scanCard').innerHTML = `
-    <form class="quick form" id="quickForm" data-code="${esc(code)}">
-      <div class="top-row">
-        ${draft.image ? `<img src="${esc(draft.image)}" alt="">` : '<div class="thumb" aria-hidden="true">📦</div>'}
-        <div style="flex:1;min-width:0">
-          <input name="name" value="${esc(draft.name)}" placeholder="What is it?" required autocomplete="off" enterkeyhint="done" aria-label="Name">
-          <p class="note">${info ? esc(found) : 'Not found online — name it once and it’s remembered.'}
-            <button type="button" class="link small" data-quick="more">More details</button></p>
-        </div>
-      </div>
-      ${similar ? `<div class="suggest"><span>Is this your <b>${esc(similar.name)}</b>?</span>
-        <button type="button" class="btn small primary" data-quick="link" data-id="${similar.id}">Yes, same thing</button></div>` : ''}
-      <span class="label">Kept in</span>
-      ${locationPicker(draft.location, true)}
-      <span class="label">How many</span>
-      <div class="qty-row">
-        <div class="stepper big"><button type="button" data-step="-1" aria-label="One less">−</button><input name="qty" type="number" inputmode="decimal" min="0" step="any" value="${draft.qty}" aria-label="Quantity"><button type="button" data-step="1" aria-label="One more">+</button></div>
-        ${unitPicker(draft.unit)}
-      </div>
-      <div class="row-actions">
-        <button type="button" class="btn" data-quick="skip">Skip</button>
-        <button class="btn primary">Save</button>
-      </div>
-    </form>`;
-  const form = $('#quickForm');
-  if (!info) form.name.focus();
-  form._draft = draft;
-  form._pack = pack;
+  const hint = info
+    ? `Found: ${[info.brand, /[a-z]/i.test(info.size) ? info.size : ''].filter(Boolean).join(' · ') || info.name}. Check it and save.`
+    : 'Not found online — give it a name once and it’s remembered from now on.';
+  $('#scanCard').innerHTML = '';
+  editFromScanner(draft, { isNew: true, hint, similar: findSimilar(info), pack });
 }
 
-function finishQuickAdd(item, delta) {
-  showResultCard(item, delta, false);
+// Step out of the camera to a full editing page; Save or Cancel brings you back to scanning.
+async function editFromScanner(item, opts = {}) {
+  pauseScanning();
+  $('#scanner').hidden = true;
+  document.body.style.overflow = '';
+  const saved = await openEditor(item, { ...opts, fromScan: true });
+  $('#scanner').hidden = false;
+  document.body.style.overflow = 'hidden';
+  if (!cam.stream && cam.hasCamera) startCamera().catch(() => showManual());
+  if (saved) showResultCard(saved.item, saved.note, false);
+  else if (!opts.isNew && byId(item.id)) showResultCard(item, '', false);
+  else $('#scanCard').innerHTML = '';
   resumeScanning();
 }
 
-$('#scanCard').addEventListener('click', async (e) => {
-  const form = e.target.closest('#quickForm');
-  const step = e.target.closest('[data-step]');
-  if (form && step) {
-    form.qty.value = Math.max(0, round((parseFloat(form.qty.value) || 0) + Number(step.dataset.step)));
-    return;
+// "Is this your Paper towels?" — attach the scanned barcode to an item you already have.
+function linkScannedTo(existing) {
+  const { item: draft, pack } = ui.editor;
+  checkpoint();
+  existing.barcode = draft.barcode;
+  existing.brand ||= draft.brand;
+  existing.image ||= draft.image;
+  if (pack && (existing.scanQty || 1) === 1) {
+    existing.scanQty = pack.count;
+    existing.unit ||= pack.unit;
   }
-  const q = e.target.closest('[data-quick]')?.dataset.quick;
-  if (q === 'skip') {
-    lookupToken++;
-    $('#scanCard').innerHTML = '';
-    return resumeScanning();
+  let note = 'Barcode linked';
+  if (prefs.scanMode === 'add') {
+    existing.qty = round(existing.qty + (existing.scanQty || 1));
+    existing.need = false;
+    note = `+${fmt(existing.scanQty || 1)} added · barcode linked`;
+  } else if (prefs.scanMode === 'use') {
+    existing.qty = round(Math.max(0, existing.qty - 1));
+    note = '−1 used · barcode linked';
   }
-  if (q === 'link') {
-    const it = byId(e.target.closest('[data-quick]').dataset.id);
-    const draft = form._draft;
-    checkpoint();
-    it.barcode = draft.barcode;
-    it.brand ||= draft.brand;
-    it.image ||= draft.image;
-    if (form._pack && (it.scanQty || 1) === 1) {
-      it.scanQty = form._pack.count;
-      it.unit ||= form._pack.unit;
-    }
-    let delta = 'Barcode linked';
-    if (prefs.scanMode === 'add') {
-      it.qty = round(it.qty + (it.scanQty || 1));
-      it.need = false;
-      delta = `+${fmt(it.scanQty || 1)} added · barcode linked`;
-    } else if (prefs.scanMode === 'use') {
-      it.qty = round(Math.max(0, it.qty - 1));
-      delta = '−1 used · barcode linked';
-    }
-    it.updated = Date.now();
-    save();
-    return finishQuickAdd(it, delta);
-  }
-  if (q === 'more') {
-    const draft = readQuickForm(form);
-    const saved = await openEditor(draft, { isNew: true });
-    if (saved) finishQuickAdd(saved, 'New item');
-    return;
-  }
+  existing.updated = Date.now();
+  save();
+  closeEditor({ item: existing, note });
+}
 
+$('#scanCard').addEventListener('click', (e) => {
   const act = e.target.closest('[data-scan]')?.dataset.scan;
   if (!act) return;
-  const it = byId(e.target.closest('[data-id]')?.dataset.id || $('#scanCard [data-id]')?.dataset.id);
-  if (act === 'undo') {
+  const it = byId($('#scanCard [data-id]')?.dataset.id);
+  if (act === 'cancel') {
+    lookupToken++;
+    $('#scanCard').innerHTML = '';
+    resumeScanning();
+  } else if (act === 'undo') {
     undo();
     $('#scanCard').innerHTML = '';
     cam.lastCode = '';
@@ -1186,11 +1203,7 @@ $('#scanCard').addEventListener('click', async (e) => {
     bump(it, act === 'inc' ? 1 : -1);
     showResultCard(it, '', false);
   } else if (act === 'edit') {
-    pauseScanning();
-    await openEditor(it);
-    if (byId(it.id)) showResultCard(it, '', false);
-    else $('#scanCard').innerHTML = '';
-    resumeScanning();
+    editFromScanner(it);
   } else if (act === 'list') {
     checkpoint();
     it.need = !it.need;
@@ -1199,27 +1212,6 @@ $('#scanCard').addEventListener('click', async (e) => {
   } else if (act === 'new') {
     quickAdd(e.target.closest('[data-code]').dataset.code);
   }
-});
-
-function readQuickForm(form) {
-  return Object.assign(form._draft, {
-    name: sentenceCase(form.name.value.trim()),
-    qty: Math.max(0, parseFloat(form.qty.value) || 0),
-    unit: singularUnit(form.unit.value),
-    location: form.location.value,
-  });
-}
-
-$('#scanCard').addEventListener('submit', (e) => {
-  if (e.target.id !== 'quickForm') return;
-  e.preventDefault();
-  const item = readQuickForm(e.target);
-  if (!item.name) return e.target.name.focus();
-  document.activeElement?.blur();
-  checkpoint();
-  state.items.push(item);
-  save();
-  finishQuickAdd(item, `New · ${qtyText(item)}`);
 });
 
 async function fetchJSON(url, ms = 5000) {
@@ -1380,11 +1372,7 @@ $('#scanner').addEventListener('click', (e) => {
   if (e.target.closest('[data-close-scan]')) return closeScanner();
   if (e.target.closest('#torchBtn')) return toggleTorch();
   if (e.target.closest('#zoomBtn')) return cycleZoom();
-  if (e.target.closest('#typeCodeBtn')) {
-    showManual();
-    $('#manualCode input').focus();
-    return;
-  }
+  if (e.target.closest('#typeCodeBtn')) return typeBarcode();
   const mode = e.target.closest('[data-mode]')?.dataset.mode;
   if (mode) {
     setScanMode(mode);
@@ -1392,60 +1380,23 @@ $('#scanner').addEventListener('click', (e) => {
   }
 });
 
-$('#manualCode').addEventListener('submit', (e) => {
-  e.preventDefault();
-  const input = e.target.querySelector('input');
-  const code = normCode(input.value);
-  input.value = '';
-  input.blur();
-  if (code) {
-    cam.lastCode = code;
-    cam.lastSeen = performance.now();
-    handleCode(code);
-  }
-});
-
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   if (!$('#sheet').hidden) closeSheet();
+  else if (ui.editor) closeEditor(null);
   else if (!$('#scanner').hidden) closeScanner();
 });
 
 // Release the camera when the app goes to the background; pick it back up on return.
 document.addEventListener('visibilitychange', () => {
-  if ($('#scanner').hidden) return;
-  if (document.hidden) {
+  if (document.hidden && cam.stream) {
     cam.running = false;
     cam.stream?.getTracks().forEach((t) => t.stop());
     cam.stream = null;
-  } else if (!cam.stream) {
+  } else if (!document.hidden && !cam.stream && cam.hasCamera && !$('#scanner').hidden) {
     startCamera().catch(() => showManual());
   }
 });
-
-// iOS shrinks only the visual viewport when the keyboard opens; fixed panels sized to the
-// full screen would leave Save hidden behind the keyboard. Size them to what's visible.
-let tallestView = 0;
-function syncViewport() {
-  const vv = window.visualViewport;
-  const h = vv ? vv.height : window.innerHeight;
-  tallestView = Math.max(tallestView, h);
-  const root = document.documentElement;
-  root.style.setProperty('--vv-h', `${h}px`);
-  root.style.setProperty('--vv-top', `${vv ? vv.offsetTop : 0}px`);
-  const typing = document.activeElement?.matches?.('input:not([type=hidden]):not([type=checkbox]), textarea, select');
-  root.classList.toggle('kb-open', Boolean(typing) && h < tallestView * 0.8);
-}
-window.visualViewport?.addEventListener('resize', syncViewport);
-window.visualViewport?.addEventListener('scroll', syncViewport);
-window.addEventListener('resize', syncViewport);
-window.addEventListener('orientationchange', () => {
-  tallestView = 0;
-  setTimeout(syncViewport, 400);
-});
-document.addEventListener('focusin', () => setTimeout(syncViewport, 60));
-document.addEventListener('focusout', () => setTimeout(syncViewport, 60));
-syncViewport();
 
 if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
   navigator.serviceWorker.register('sw.js').catch(() => {});
