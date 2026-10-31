@@ -1,7 +1,7 @@
 // Network first so updates show up right away; falls back to the cache when offline.
 // Product lookups are never cached.
-const CACHE = 'homestock-v4';
-const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'parser.js', 'manifest.webmanifest', 'icon.svg', 'apple-touch-icon.png'];
+const CACHE = 'homestock-v5';
+const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'parser.js', 'scan-worker.js', 'manifest.webmanifest', 'icon.svg', 'apple-touch-icon.png'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)));

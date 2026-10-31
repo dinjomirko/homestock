@@ -105,6 +105,9 @@ export function parseCommand(text, opts = {}) {
     .trim();
   if (!clean) return [];
 
+  const query = parseQuery(clean, locByLower);
+  if (query) return [query];
+
   // Split into clauses on commas/"then", and on "and" only when what follows starts a new
   // command ("…tomatoes and a box of pasta"), so "salt and pepper" stays one item.
   const clauses = [];
@@ -131,6 +134,22 @@ export function parseCommand(text, opts = {}) {
     actions.push(a);
   }
   return actions;
+}
+
+// Questions don't change anything: "how many paper towels do we have", "do we have eggs".
+const QUESTION = /^(?:(?:hey|ok|okay|so|um|uh)\s+)*(?:how many|how much|do we have|do i have|do we still have|have we got|have i got|is there|are there|got any|where is|where are|where's|wheres|check on|check)\s+(.+)$/;
+
+function parseQuery(clean, locByLower) {
+  const m = clean.match(QUESTION);
+  if (!m) return null;
+  const rest = m[1]
+    .replace(/\b(?:do|did|have|has)\s+(?:we|i)(?:\s+(?:have|got))?\b/g, ' ')
+    .replace(/\b(?:(?:is|are)\s+)?(?:left|in stock|at home|in the house|there|still|anymore)\b/g, ' ')
+    .replace(/\s+(?:is|are)$/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const a = parseClause(rest, 'query', locByLower);
+  return a && { ...a, action: 'query', qty: null };
 }
 
 function parseClause(clause, prevAction, locByLower) {

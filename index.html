@@ -3,8 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#1f7a5c">
+  <meta name="theme-color" content="#f6f5f1" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#121413" media="(prefers-color-scheme: dark)">
   <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="apple-mobile-web-app-title" content="Homestock">
   <title>Homestock</title>
   <link rel="manifest" href="manifest.webmanifest">
@@ -21,14 +23,17 @@
       </button>
     </div>
     <div id="stockTools">
-      <input id="search" type="search" placeholder="Search everything" autocomplete="off">
-      <nav id="chips" class="chips" aria-label="Filter by place"></nav>
+      <div class="search-wrap">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+        <input id="search" type="search" placeholder="Search everything" autocomplete="off" enterkeyhint="search" aria-label="Search">
+      </div>
+      <nav id="chips" class="chips" aria-label="Filter"></nav>
     </div>
   </header>
 
   <main id="main"></main>
 
-  <nav class="tabbar">
+  <nav class="tabbar" aria-label="Main">
     <button class="tab" data-view="stock">
       <svg viewBox="0 0 24 24"><path d="M3 7l9-4 9 4-9 4-9-4zm0 0v10l9 4 9-4V7M12 11v10"/></svg>
       <span>Stock</span>
@@ -37,7 +42,7 @@
       <svg viewBox="0 0 24 24"><path d="M3 7V4h3M18 4h3v3M21 17v3h-3M6 20H3v-3M7 8v8M10 8v8M13 8v8M16.5 8v8"/></svg>
       <span>Scan</span>
     </button>
-    <button id="speakBtn" class="action" aria-label="Speak a change">
+    <button id="speakBtn" class="action" aria-label="Speak a change or ask a question">
       <svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
       <span>Speak</span>
     </button>
@@ -47,23 +52,32 @@
     </button>
   </nav>
 
-  <div id="scanner" class="scanner" hidden>
+  <div id="scanner" class="scanner" hidden role="dialog" aria-label="Barcode scanner">
     <div class="scan-top">
-      <button class="icon-btn light" data-close-scan aria-label="Close scanner">
+      <button class="round-btn" data-close-scan aria-label="Close scanner">
         <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>
-      <div class="seg" role="radiogroup" aria-label="Scan mode">
-        <button data-mode="add" role="radio">Adding</button>
-        <button data-mode="use" role="radio">Using up</button>
+      <div class="seg" role="radiogroup" aria-label="What a scan does">
+        <button data-mode="add" role="radio">Add</button>
+        <button data-mode="use" role="radio">Use</button>
+        <button data-mode="check" role="radio">Check</button>
       </div>
+      <button id="torchBtn" class="round-btn" aria-label="Flashlight" aria-pressed="false" hidden>
+        <svg viewBox="0 0 24 24"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg>
+      </button>
     </div>
-    <div id="reader"></div>
-    <p id="scanHint" class="scan-hint">Point the camera at a barcode</p>
-    <ul id="scanLog" class="scan-log"></ul>
-    <form id="manualCode" class="scan-manual">
-      <input inputmode="numeric" autocomplete="off" placeholder="…or type the barcode number" aria-label="Barcode number">
-      <button>Go</button>
+    <div id="viewfinder" class="viewfinder">
+      <video id="camera" playsinline muted autoplay></video>
+      <div class="reticle" aria-hidden="true"><i></i><i></i><i></i><i></i><b class="laser"></b></div>
+      <p id="scanHint" class="scan-hint" aria-live="polite"></p>
+      <button id="zoomBtn" class="zoom-btn" hidden aria-label="Zoom">1×</button>
+    </div>
+    <div id="scanCard" class="scan-card" aria-live="polite"></div>
+    <form id="manualCode" class="scan-manual" hidden>
+      <input inputmode="numeric" autocomplete="off" placeholder="Barcode number" aria-label="Barcode number" enterkeyhint="go">
+      <button>Look up</button>
     </form>
+    <button id="typeCodeBtn" class="type-code">Type a barcode instead</button>
   </div>
 
   <div id="backdrop" class="backdrop" hidden></div>

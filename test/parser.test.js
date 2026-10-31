@@ -52,6 +52,19 @@ test('out, need, set', () => {
   assert.deepEqual([set2.action, set2.qty, set2.name], ['set', 4, 'paper towels']);
 });
 
+test('questions are answered, not applied', () => {
+  for (const [text, name] of [
+    ['How many paper towels do we have?', 'paper towels'],
+    ['do we have any eggs', 'eggs'],
+    ['how many rolls of toilet paper are left', 'toilet paper'],
+    ['is there any milk in the fridge', 'milk'],
+    ['where are the AA batteries', 'aa batteries'],
+  ]) {
+    const a = one(text);
+    assert.deepEqual([a.action, a.name], ['query', name], text);
+  }
+});
+
 test('location at the end of a sentence', () => {
   const a = one('Took 2 cans of paint out of the garage');
   assert.deepEqual([a.action, a.qty, a.name, a.location], ['remove', 2, 'paint', 'Garage']);
