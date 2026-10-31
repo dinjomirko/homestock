@@ -1,11 +1,11 @@
 import {
   parseCommand, resolveActions, matchItem, matchExact, guessLocation, guessEmoji, parsePack, parseListLines,
   suggestShelfLife, openLife, isoDate, DEFAULT_LOCATIONS,
-} from './parser.js?v=28';
+} from './parser.js?v=29';
 import {
   initSync, pushSoon, syncInfo, createHousehold, joinHousehold, leaveHousehold, authenticate, useHousehold, signOut,
   removeMember, newJoinCode, renameMe,
-} from './sync.js?v=28';
+} from './sync.js?v=29';
 
 const APP_VERSION = new URL(import.meta.url).searchParams.get('v') || 'dev';
 const STORAGE_KEY = 'homestock.v1';
@@ -35,7 +35,8 @@ let state = load(STORAGE_KEY, { items: [] });
 const prefs = { scanMode: 'add', sound: true, stores: ['Costco', 'Aldi', 'Target', 'Walmart'], places: [...DEFAULT_LOCATIONS], subPlaces: {}, folded: [], ...load(PREFS_KEY, {}) };
 delete prefs.shopStore; // the store filter used to be remembered between launches; now it isn't
 // shopStore: the store picked at the top of the shopping list, for this visit only.
-const ui = { view: 'stock', loc: 'All', q: '', bought: new Map(), flash: null, editor: null, paste: null, account: null, shopStore: 'all' };
+// select: while picking several Stock items to move together, a Map of picked rows.
+const ui = { view: 'stock', loc: 'All', q: '', bought: new Map(), flash: null, editor: null, paste: null, account: null, shopStore: 'all', select: null };
 const undoStack = [];
 
 function load(key, fallback) {
@@ -190,6 +191,74 @@ function addSpot(place, spot) {
 }
 const shelfAt = (it, place) => (place === it.location ? it.shelf || '' : '');
 
+// Move an item to a place (and a spot there). From a row under one place (`from`), only what's
+// kept there moves, joining whatever is already at the new place; without one, all of it moves.
+// Spots belong to the main place, so a spot only sticks when the item ends up there.
+function moveItem(it, from, place, spot = '') {
+  if (!it.spots || !from) {
+    delete it.spots;
+    it.location = place;
+    it.shelf = spot;
+  } else if (from === it.location) {
+    if (place !== it.location) {
+      delete it.spots[place];
+      it.location = place;
+    }
+    it.shelf = spot;
+  } else if (from !== place) {
+    const n = it.spots[from] || 0;
+    delete it.spots[from];
+    if (place === it.location) it.shelf = spot;
+    else it.spots[place] = round((it.spots[place] || 0) + n);
+  } else if (place === it.location) it.shelf = spot;
+  it.updated = Date.now();
+}
+
+// Places and their spots as buttons: drop targets while dragging, or choices in the Move sheet.
+function placeChoices({ current = null, adding = false } = {}) {
+  const on = (pl, sp) => (current && current.place === pl && current.spot === sp ? 'current' : '');
+  return `<div class="move-grid">${allLocations().map((pl) => `
+    <div class="move-place ${adding || spotsIn(pl).length ? 'wide' : ''}">
+      <button type="button" class="${on(pl, '')}" data-move-place="${esc(pl)}" data-move-spot="">${esc(pl)}</button>
+      <div class="move-spots">${spotsIn(pl).map((sp) => `<button type="button" class="spot ${on(pl, sp)}" data-move-place="${esc(pl)}" data-move-spot="${esc(sp)}">${esc(sp)}</button>`).join('')}${
+        adding ? `<button type="button" class="spot new" data-move-place="${esc(pl)}" data-move-spot="__new" aria-label="New spot in the ${esc(pl.toLowerCase())}">+ Spot</button>` : ''}</div>
+    </div>`).join('')}
+    ${adding ? '<button type="button" class="new-place" data-move-place="__new" data-move-spot="">+ New place</button>' : ''}</div>`;
+}
+
+// Move picked rows ({id, from}) to a place and spot, asking for a name when it's a new one.
+function moveTo(picks, place, spot = '') {
+  if (place === '__new') {
+    place = sentenceCase(prompt('Name the new place (e.g. Basement, Hall closet)')?.trim() || '');
+    if (!place) return;
+    if (!allLocations().includes(place)) {
+      prefs.places = [...allLocations(), place];
+      savePrefs();
+    }
+  }
+  if (spot === '__new') {
+    spot = sentenceCase(prompt(`Name a spot in the ${place.toLowerCase()} (e.g. Shelf 2, Top drawer, Bin A)`)?.trim() || '');
+    if (!spot) return;
+    addSpot(place, spot);
+  }
+  const moving = picks.map((p) => ({ it: byId(p.id), from: p.from || null })).filter((p) => p.it);
+  if (!moving.length) return;
+  checkpoint();
+  for (const { it, from } of moving) moveItem(it, from, place, spot);
+  ui.select = null;
+  if (!prefs.moveTipSeen) {
+    prefs.moveTipSeen = true;
+    savePrefs();
+  }
+  if (moving.length === 1) ui.flash = moving[0].it.id;
+  buzz(20);
+  save();
+  const what = moving.length === 1 ? moving[0].it.name : `${new Set(moving.map((p) => p.it.id)).size} items`;
+  toast(`${what} → ${place}${spot ? ` · ${spot}` : ''}`, { undo: true });
+}
+
+const pickKey = (id, place) => `${id}@${place || ''}`;
+
 function pluralUnit(unit, n) {
   if (!unit || n <= 1) return unit || ''; // "1 bottle", "½ bottle"
 
@@ -243,6 +312,8 @@ function ago(ts) {
 
 function render() {
   document.body.classList.toggle('editing', Boolean(ui.editor || ui.paste || ui.account));
+  if (ui.view !== 'stock') ui.select = null;
+  document.body.classList.toggle('selecting', Boolean(ui.select));
   document.querySelectorAll('.tab').forEach((t) => {
     t.classList.toggle('on', t.dataset.view === ui.view);
     t.setAttribute('aria-current', t.dataset.view === ui.view ? 'page' : 'false');
@@ -291,7 +362,18 @@ function itemRow(it, showLoc, place = null) {
     : showLoc ? esc(it.location) + (it.shelf ? ` · ${esc(it.shelf)}` : '') : '';
   const meta = [esc(it.brand), where, openedText(it), useByHtml(it), listed ? '<span class="warn">On list</span>' : '']
     .filter(Boolean).join(' · ');
-  return `<li class="swipe-row swipeable" data-id="${it.id}" data-swipe-right="${listed ? 'unlist' : 'tolist'}" data-swipe-left="delete">
+  if (ui.select) {
+    const on = ui.select.has(pickKey(it.id, place));
+    return `<li class="swipe-row" data-id="${it.id}" data-place="${esc(place || '')}">
+      <button class="item pick-item ${on ? 'picked' : ''}" data-act="pick" aria-pressed="${on}">
+        <span class="tick" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg></span>
+        ${thumb(it, false)}
+        <span class="info"><span class="name">${esc(it.name)}</span>${meta ? `<span class="meta">${meta}</span>` : ''}</span>
+        <span class="qty ${cls}">${fmt(here)}${it.unit ? `<small>${esc(pluralUnit(it.unit, here))}</small>` : ''}</span>
+      </button>
+    </li>`;
+  }
+  return `<li class="swipe-row swipeable" data-id="${it.id}" data-place="${esc(place || '')}" data-swipe-right="${listed ? 'unlist' : 'tolist'}" data-swipe-left="delete">
     <span class="swipe-label act-right ${listed ? 'off' : ''}" aria-hidden="true">${listed ? 'Off the list' : 'Add to list'}</span>
     <span class="swipe-label act-left" aria-hidden="true">Delete</span>
     <div class="item ${ui.flash === it.id ? 'flash' : ''}">
@@ -371,17 +453,30 @@ function renderStock() {
         if (!group.length) return '';
         // Tap a place's heading to fold it away; folding is per phone, not shared.
         const folded = prefs.folded.includes(loc);
+        const allPicked = ui.select && group.every((i) => ui.select.has(pickKey(i.id, loc)));
         return `<h2 class="group"><button class="fold ${folded ? 'shut' : ''}" data-fold="${esc(loc)}" aria-expanded="${!folded}">
             <span>${esc(loc)}</span><span class="fold-meta">${folded ? `${group.length} item${group.length === 1 ? '' : 's'}` : ''}<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></span>
-          </button></h2>${folded ? '' : `<ul class="list">${placeList(group, loc)}</ul>`}`;
+          </button>${ui.select ? `<button class="pick-all" data-pick-place="${esc(loc)}">${allPicked ? 'Clear' : 'Select all'}</button>` : ''}</h2>${folded ? '' : `<ul class="list stock-list">${placeList(group, loc)}</ul>`}`;
       })
       .join('');
   } else {
     const place = ui.loc !== 'All' && ui.loc !== 'soon' && !q ? ui.loc : null;
-    html = `<ul class="list" style="margin-top:12px">${place ? placeList(items, place) : items.map((i) => itemRow(i, true)).join('')}</ul>`;
+    html = `<ul class="list stock-list" style="margin-top:12px">${place ? placeList(items, place) : items.map((i) => itemRow(i, true)).join('')}</ul>`;
   }
-  const tip = prefs.stockSwipeTipSeen ? '' : '<p class="note" style="margin:10px 4px 0">Swipe an item right to add it to the shopping list, or left to delete it.</p>';
-  return tip + html + listNote + `<div class="add-pair"><button class="add-row" data-act="add">+ Add an item</button><button class="add-row" data-act="paste">Paste a list</button></div>`;
+  if (ui.select) {
+    const n = ui.select.size;
+    return `<div class="stock-bar"><p class="note">Tap items to pick them, then move them together.</p></div>` + html +
+      `<div class="select-bar" role="toolbar" aria-label="Selected items">
+        <button class="link" data-act="select-done">Cancel</button>
+        <span>${n ? `${n} selected` : 'None selected'}</span>
+        <button class="btn primary" data-act="move-picked" ${n ? '' : 'disabled'}>Move to…</button>
+      </div>`;
+  }
+  const tip = !prefs.stockSwipeTipSeen
+    ? 'Swipe an item right to add it to the shopping list, or left to delete it. Press and hold to drag it to another place.'
+    : !prefs.moveTipSeen ? 'Press and hold an item to drag it to another place or spot.' : '';
+  return `<div class="stock-bar"><p class="note">${tip}</p><button class="link" data-act="select">Select</button></div>` +
+    html + listNote + `<div class="add-pair"><button class="add-row" data-act="add">+ Add an item</button><button class="add-row" data-act="paste">Paste a list</button></div>`;
 }
 
 function renderChips() {
@@ -2592,6 +2687,15 @@ $('#main').addEventListener('click', (e) => {
     ui.shopStore = storeChip.dataset.shopStore;
     return render();
   }
+  const pickAll = e.target.closest('[data-pick-place]');
+  if (pickAll) {
+    const place = pickAll.dataset.pickPlace;
+    const group = state.items.filter(inStock).filter((i) => shownIn(i).includes(place));
+    const keys = group.map((i) => pickKey(i.id, place));
+    const all = keys.every((k) => ui.select.has(k));
+    group.forEach((i, n) => (all ? ui.select.delete(keys[n]) : ui.select.set(keys[n], { id: i.id, from: place })));
+    return render();
+  }
   const fold = e.target.closest('[data-fold]');
   if (fold) {
     const place = fold.dataset.fold;
@@ -2606,6 +2710,26 @@ $('#main').addEventListener('click', (e) => {
     case 'inc': return bump(item, 1, btn.dataset.place || null);
     case 'dec': return bump(item, -1, btn.dataset.place || null);
     case 'paste': return openPaste();
+    case 'select':
+      ui.select = new Map();
+      return render();
+    case 'select-done':
+      ui.select = null;
+      return render();
+    case 'pick': {
+      const from = btn.closest('[data-place]').dataset.place || null;
+      const key = pickKey(item.id, from);
+      if (ui.select.has(key)) ui.select.delete(key);
+      else ui.select.set(key, { id: item.id, from });
+      buzz(10);
+      return render();
+    }
+    case 'move-picked': {
+      const n = new Set([...ui.select.values()].map((p) => p.id)).size;
+      return openSheet(`
+        <div class="sheet-head"><h2>Move ${n === 1 ? byId([...ui.select.values()][0].id)?.name.toLowerCase() || '1 item' : `${n} items`} to…</h2><button class="link" data-close>Cancel</button></div>
+        <div class="picker">${placeChoices({ adding: true })}</div>`);
+    }
     case 'edit': return openEditor(item);
     case 'got': return markBought(item);
     case 'unlist': return removeFromList(item);
@@ -2625,14 +2749,15 @@ $('#main').addEventListener('click', (e) => {
   }
 });
 
-// Press and hold a shopping-list row to pick it up, then drop it on a store in the tray that
-// appears at the bottom. Moving before the hold completes is a normal scroll or swipe.
+// Press and hold a row to pick it up, then drop it in the tray that appears at the bottom: on a
+// store (shopping list) or on a place or spot (Stock). Moving before the hold completes is a
+// normal scroll or swipe.
 let drag = null;
 const HOLD_MS = 350;
 
 $('#main').addEventListener('pointerdown', (e) => {
-  const row = e.target.closest('.shop-list .swipe-row.swipeable');
-  if (!row || e.button > 0) return;
+  const row = e.target.closest('.shop-list .swipe-row.swipeable, .stock-list .swipe-row.swipeable');
+  if (!row || e.button > 0 || e.target.closest('.stepper')) return;
   drag = { row, id: e.pointerId, x: e.clientX, y: e.clientY, active: false, timer: setTimeout(startDrag, HOLD_MS) };
 });
 
@@ -2654,7 +2779,11 @@ function startDrag() {
   row.classList.add('drag-src');
   try { row.setPointerCapture(drag.id); } catch {}
   const tray = $('#dropTray');
-  tray.innerHTML = `<p>Drop on a store</p>${storeChoices(byId(row.dataset.id), 'data-drop-store')}`;
+  const it = byId(row.dataset.id);
+  const place = row.dataset.place || it.location;
+  tray.innerHTML = row.closest('.shop-list')
+    ? `<p>Drop on a store</p>${storeChoices(it, 'data-drop-store')}`
+    : `<p>Drop on a place or spot</p>${placeChoices({ current: { place, spot: shelfAt(it, place) } })}`;
   tray.hidden = false;
   buzz(25);
 }
@@ -2664,7 +2793,7 @@ function moveGhost(x, y) {
   drag.ghost.style.transform = `translate(${x - drag.offX}px, ${y - drag.offY - 44}px) scale(.9) rotate(-1.5deg)`;
 }
 
-const dropTargetAt = (x, y) => document.elementFromPoint(x, y)?.closest('[data-drop-store]');
+const dropTargetAt = (x, y) => document.elementFromPoint(x, y)?.closest('[data-drop-store], #dropTray [data-move-place]');
 
 function endDrag() {
   if (!drag) return;
@@ -2693,9 +2822,14 @@ $('#main').addEventListener('pointerup', (e) => {
   if (!drag.active) return endDrag();
   const target = dropTargetAt(e.clientX, e.clientY);
   const it = byId(drag.row.dataset.id);
+  const from = drag.row.dataset.place || null;
   endDrag();
   lastSwipeAt = Date.now();
-  if (target) assignStore(it, target.dataset.dropStore);
+  if (target?.dataset.dropStore != null) assignStore(it, target.dataset.dropStore);
+  else if (target) {
+    const { movePlace: place, moveSpot: spot } = target.dataset;
+    if (place !== (from || it.location) || spot !== shelfAt(it, place)) moveTo([{ id: it.id, from }], place, spot);
+  }
 });
 
 $('#main').addEventListener('pointercancel', (e) => {
@@ -2704,7 +2838,7 @@ $('#main').addEventListener('pointercancel', (e) => {
 
 // While dragging, the page must not scroll under your finger.
 document.addEventListener('touchmove', (e) => drag?.active && e.preventDefault(), { passive: false });
-$('#main').addEventListener('contextmenu', (e) => e.target.closest('.shop-list') && e.preventDefault());
+$('#main').addEventListener('contextmenu', (e) => e.target.closest('.shop-list, .stock-list') && e.preventDefault());
 
 // Swipe rows sideways. Stock: right puts it on the shopping list (or takes it off), left
 // deletes it. Shopping list: left takes it off the list. The row only follows the finger once
@@ -2815,6 +2949,12 @@ $('#sheet').addEventListener('click', (e) => {
     $('#typeInput').value = example.textContent;
     $('#typeInput').focus();
     return;
+  }
+  const dest = e.target.closest('[data-move-place]');
+  if (dest && ui.select) {
+    const picks = [...ui.select.values()];
+    closeSheet();
+    return moveTo(picks, dest.dataset.movePlace, dest.dataset.moveSpot);
   }
   const pick = e.target.closest('[data-assign-store]');
   if (pick) {
