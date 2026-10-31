@@ -175,7 +175,7 @@ h2.group { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; co
 /* Tab bar */
 .tabbar {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 10;
-  display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; align-items: center;
+  display: grid; grid-template-columns: repeat(5, 1fr); align-items: center;
   height: calc(var(--tabbar-h) + env(safe-area-inset-bottom));
   padding: 6px 10px env(safe-area-inset-bottom);
   background: color-mix(in srgb, var(--card) 92%, transparent);
@@ -505,3 +505,23 @@ body { font-variant-numeric: lining-nums; }
 .members { margin-top: 10px; }
 .members .item { min-height: 52px; }
 .note.error { color: var(--danger); min-height: 1em; }
+
+/* Recipes */
+.cook-quick { padding: 0 0 6px; }
+.pick-row { cursor: pointer; }
+.pick-row .check { pointer-events: none; }
+.pick-row.on .check::before { background: var(--accent); border-color: var(--accent); }
+.pick-row.on .check svg { opacity: 1; color: var(--accent-ink); }
+.show-others { display: block; margin: 12px 4px 0; }
+.cook-options h3 { font-family: var(--serif); }
+.cook-preview { margin-top: 14px; }
+.cook-preview .share-preview { margin-top: 8px; }
+.cook-spacer { height: 84px; }
+.cook-bar {
+  position: fixed; left: 12px; right: 12px; z-index: 9; max-width: 576px; margin: 0 auto;
+  bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom) + 10px);
+  display: flex; align-items: center; gap: 8px; padding: 8px 8px 8px 16px;
+  background: var(--card); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow);
+}
+.cook-bar span { flex: 1; font-weight: 600; }
+.cook-bar .btn { min-height: 44px; }

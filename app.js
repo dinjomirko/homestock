@@ -1,11 +1,11 @@
 import {
   parseCommand, resolveActions, matchItem, matchExact, guessLocation, guessEmoji, parsePack, parseListLines,
   suggestShelfLife, openLife, isoDate, DEFAULT_LOCATIONS,
-} from './parser.js?v=25';
+} from './parser.js?v=26';
 import {
   initSync, pushSoon, syncInfo, createHousehold, joinHousehold, leaveHousehold, authenticate, useHousehold, signOut,
   removeMember, newJoinCode, renameMe,
-} from './sync.js?v=25';
+} from './sync.js?v=26';
 
 const APP_VERSION = new URL(import.meta.url).searchParams.get('v') || 'dev';
 const STORAGE_KEY = 'homestock.v1';
@@ -238,7 +238,7 @@ function render() {
     t.setAttribute('aria-current', t.dataset.view === ui.view ? 'page' : 'false');
   });
   $('#stockTools').hidden = ui.view !== 'stock';
-  $('#title').textContent = ui.view === 'stock' ? 'Key Record' : 'Shopping';
+  $('#title').textContent = { stock: 'Key Record', shop: 'Shopping', cook: 'Recipes' }[ui.view];
   const shopCount = shoppingItems().filter((i) => !ui.bought.has(i.id)).length;
   $('#shopBadge').hidden = !shopCount;
   $('#shopBadge').textContent = shopCount;
@@ -251,7 +251,8 @@ function render() {
     if (!$('#accountForm')) $('#main').innerHTML = renderAccount();
     return;
   }
-  $('#main').innerHTML = ui.view === 'stock' ? renderStock() : renderShop();
+  $('#main').innerHTML = ui.view === 'stock' ? renderStock() : ui.view === 'shop' ? renderShop() : renderCook();
+  if (ui.view === 'cook') updateCookSummary();
   if (ui.flash) $('#main .flash')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   ui.flash = null;
 }
@@ -433,14 +434,167 @@ function renderShop() {
       prefs.swipeTipSeen ? '' : 'Swipe left or tap ✕ to take something off the list.',
     ].filter(Boolean).join(' ') || 'Tick things off as you shop.'}</p>`;
   }
-  const kitchen = state.items.filter((i) => KITCHEN.includes(i.location) && i.qty > 0).length;
-  html += `<div class="card">
-      <h3>What can I cook?</h3>
-      <p>Copies the ${kitchen} things in your pantry, fridge and freezer as a ready-made question, with anything expiring soon listed first. Paste it into Claude or any recipe app.</p>
-      <button class="btn primary" data-act="recipe" ${kitchen ? '' : 'disabled'}>Copy kitchen list</button>
+  return html;
+}
+
+// ---------- Recipes ----------
+// Pick the ingredients to cook with and get a ready-made question for Claude or any recipe app.
+
+const MEALS = ['Any meal', 'Breakfast', 'Lunch', 'Dinner', 'Snack', 'Dessert'];
+const byUseBy = (a, b) => (daysLeft(a) ?? 999) - (daysLeft(b) ?? 999) || a.name.localeCompare(b.name);
+
+// Filled in place (not copied), so a change made through it sticks.
+function cookPrefs() {
+  const c = (prefs.cook ??= {});
+  const defaults = { picked: [], meal: 'Any meal', servings: 2, extras: true, notes: '', others: false };
+  for (const [k, v] of Object.entries(defaults)) c[k] ??= v;
+  return c;
+}
+
+// Picked items you still have.
+function cookPicked() {
+  const have = new Set(state.items.filter((i) => i.qty > 0).map((i) => i.id));
+  return cookPrefs().picked.filter((id) => have.has(id));
+}
+
+function renderCook() {
+  const c = cookPrefs();
+  const picked = new Set(cookPicked());
+  const have = state.items.filter((i) => i.qty > 0);
+  if (!have.length) {
+    return `<div class="empty"><div class="big">🍳</div><h2>Nothing in stock yet</h2>
+      <p>Once you’ve added what’s in your kitchen, pick ingredients here to get recipe ideas.</p></div>`;
+  }
+  const kitchen = allLocations().filter((pl) => KITCHEN.includes(pl));
+  const others = allLocations().filter((pl) => !KITCHEN.includes(pl) && have.some((i) => shownIn(i).includes(pl)));
+  const places = c.others ? [...kitchen, ...others] : kitchen;
+  const soon = have.filter(useSoon);
+  let html = `<p class="note" style="margin:4px 4px 10px">Tick what you’d like to cook with, then copy a ready-made question for Claude or any recipe app.</p>
+    <div class="chips cook-quick">
+      ${soon.length ? `<button class="chip soon" data-cook="soon">Use soon <small>${soon.length}</small></button>` : ''}
+      <button class="chip" data-cook="all">All shown</button>
+      <button class="chip" data-cook="none">None</button>
+    </div>`;
+  for (const pl of places) {
+    const group = have.filter((i) => shownIn(i).includes(pl)).sort(byUseBy);
+    if (!group.length) continue;
+    html += `<h2 class="group">${esc(pl)}</h2><ul class="list pick-list">${group.map((it) => `
+      <li class="item pick-row ${picked.has(it.id) ? 'on' : ''}" data-pick-id="${it.id}" role="checkbox" aria-checked="${picked.has(it.id)}" tabindex="0">
+        <span class="check" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></svg></span>
+        ${thumb(it, false)}
+        <div class="info"><div class="name">${esc(it.name)}</div><div class="meta">${[esc(qtyText(it)), useByHtml(it), openedText(it)].filter(Boolean).join(' · ')}</div></div>
+      </li>`).join('')}</ul>`;
+  }
+  if (others.length) {
+    html += `<button class="link small show-others" data-cook="others">${c.others ? 'Hide' : 'Show'} ${others.map((pl) => esc(pl.toLowerCase())).join(', ')}</button>`;
+  }
+  html += `<div class="card form cook-options">
+      <h3>Recipe options</h3>
+      <div class="row2">
+        <label>Meal<select data-cook-opt="meal">${MEALS.map((m) => `<option ${m === c.meal ? 'selected' : ''}>${m}</option>`).join('')}</select></label>
+        <label>Servings<select data-cook-opt="servings">${[1, 2, 3, 4, 5, 6, 8].map((n) => `<option ${n === c.servings ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
+      </div>
+      <label>Ingredients
+        <select data-cook-opt="extras">
+          <option value="1" ${c.extras ? 'selected' : ''}>Happy to buy a few extras</option>
+          <option value="0" ${c.extras ? '' : 'selected'}>Only what I picked (plus basics)</option>
+        </select>
+      </label>
+      <label>Notes<input data-cook-opt="notes" value="${esc(c.notes)}" placeholder="e.g. vegetarian, 30 minutes, kid-friendly" autocomplete="off" enterkeyhint="done"></label>
+      <details class="cook-preview"><summary>See the question</summary><pre class="share-preview" id="cookPreview"></pre></details>
+    </div>
+    <div class="cook-spacer"></div>
+    <div class="cook-bar">
+      <span id="cookCount"></span>
+      <button class="btn" data-cook="copy">Copy</button>
+      <button class="btn primary" data-cook="claude">Ask Claude</button>
     </div>`;
   return html;
 }
+
+function recipePrompt() {
+  const c = cookPrefs();
+  const items = cookPicked().map(byId).filter(Boolean).sort(byUseBy);
+  const meal = c.meal === 'Any meal' ? 'a meal' : c.meal.toLowerCase();
+  const line = (i) => `- ${i.name} (${qtyText(i)})${useSoon(i) ? ' — use soon' : ''}`;
+  return [
+    `I’d like recipe ideas for ${meal} for ${c.servings} ${c.servings === 1 ? 'person' : 'people'}, using what I have at home:`,
+    items.map(line).join('\n'),
+    c.extras ? 'I’m happy to buy a few extra ingredients — list anything I’d need.' : 'Please use only these ingredients plus basics like salt, pepper, oil and water.',
+    items.some(useSoon) ? 'Prioritise the ones marked “use soon”.' : '',
+    c.notes.trim() ? `Notes: ${c.notes.trim()}` : '',
+    'Suggest 3 recipes, each with an ingredient list and short steps.',
+  ].filter(Boolean).join('\n\n');
+}
+
+function updateCookSummary() {
+  const n = cookPicked().length;
+  if ($('#cookCount')) $('#cookCount').textContent = n ? `${n} picked` : 'Pick ingredients';
+  if ($('#cookPreview')) $('#cookPreview').textContent = n ? recipePrompt() : 'Pick some ingredients first.';
+  document.querySelectorAll('.cook-bar .btn').forEach((b) => (b.disabled = !n));
+}
+
+function setPicked(ids) {
+  cookPrefs().picked = [...new Set(ids)];
+  savePrefs();
+  document.querySelectorAll('[data-pick-id]').forEach((row) => {
+    const on = cookPrefs().picked.includes(row.dataset.pickId);
+    row.classList.toggle('on', on);
+    row.setAttribute('aria-checked', on);
+  });
+  updateCookSummary();
+}
+
+async function sendRecipe(toClaude) {
+  const text = recipePrompt();
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    if (!toClaude) return prompt('Copy this:', text);
+  }
+  if (toClaude) window.open(`https://claude.ai/new?q=${encodeURIComponent(text)}`, '_blank');
+  else toast('Copied — paste it into Claude or any recipe app');
+}
+
+$('#main').addEventListener('click', (e) => {
+  if (ui.view !== 'cook' || ui.editor || ui.paste || ui.account) return;
+  const row = e.target.closest('[data-pick-id]');
+  if (row) {
+    const id = row.dataset.pickId;
+    const picked = cookPicked();
+    return setPicked(picked.includes(id) ? picked.filter((x) => x !== id) : [...picked, id]);
+  }
+  const act = e.target.closest('[data-cook]')?.dataset.cook;
+  const shown = () => [...document.querySelectorAll('[data-pick-id]')].map((r) => r.dataset.pickId);
+  if (act === 'soon') setPicked(state.items.filter(useSoon).map((i) => i.id));
+  if (act === 'all') setPicked(shown());
+  if (act === 'none') setPicked([]);
+  if (act === 'copy') sendRecipe(false);
+  if (act === 'claude') sendRecipe(true);
+  if (act === 'others') {
+    cookPrefs().others = !cookPrefs().others;
+    savePrefs();
+    render();
+  }
+});
+
+$('#main').addEventListener('keydown', (e) => {
+  if ((e.key === ' ' || e.key === 'Enter') && e.target.matches('[data-pick-id]')) {
+    e.preventDefault();
+    e.target.click();
+  }
+});
+
+const readCookOption = (e) => {
+  const key = e.target.dataset?.cookOpt;
+  if (!key) return;
+  const v = e.target.value;
+  cookPrefs()[key] = key === 'servings' ? Number(v) : key === 'extras' ? v === '1' : v;
+  savePrefs();
+  updateCookSummary();
+};
+$('#main').addEventListener('change', readCookOption);
+$('#main').addEventListener('input', readCookOption);
 
 // ---------- Changes ----------
 
@@ -1144,7 +1298,6 @@ function openMenu() {
       <button data-menu="household">Household sharing${syncInfo().joined ? ' · On' : ''}</button>
       <button data-menu="siri">Set up “Hey Siri, Key Record”</button>
       <button data-menu="badge">Use-soon count on app icon: ${prefs.badge ? 'On' : 'Off'}</button>
-      <button data-menu="recipe">Copy kitchen list for recipe ideas</button>
       <button data-menu="sound">Scan beep: ${prefs.sound ? 'On' : 'Off'}</button>
       <button data-menu="export">Back up to a file</button>
       <button data-menu="import">Restore from a backup file</button>
@@ -1593,18 +1746,6 @@ function shareShoppingList() {
     <pre class="share-preview">${esc(text)}</pre>
     <div class="row-actions"><button class="btn" data-share="copy">Copy</button><button class="btn primary" data-share="send">Share…</button></div>`);
   $('#sheet')._shareText = text;
-}
-
-function shareKitchen() {
-  const items = state.items.filter((i) => KITCHEN.includes(i.location) && i.qty > 0);
-  const soon = items.filter(useSoon).sort((a, b) => daysLeft(a) - daysLeft(b));
-  const rest = items.filter((i) => !useSoon(i));
-  const line = (i) => `- ${i.name} (${qtyText(i)})`;
-  let text = "Here's what I have in my kitchen right now:\n";
-  if (soon.length) text += `\nUse these soon:\n${soon.map(line).join('\n')}\n\nEverything else:\n`;
-  text += rest.map(line).join('\n');
-  text += `\n\nWhat could I make using mostly these${soon.length ? ', ideally using up the ones that expire soon' : ''}? Suggest a few recipes and tell me anything small I'd need to buy.`;
-  shareText(text, 'My kitchen');
 }
 
 function exportBackup() {
@@ -2351,7 +2492,6 @@ $('#main').addEventListener('click', (e) => {
       ui.view = 'shop';
       render();
       return scrollTo(0, 0);
-    case 'recipe': return shareKitchen();
   }
 });
 
@@ -2606,7 +2746,6 @@ $('#sheet').addEventListener('click', (e) => {
   if (m === 'paste') openPaste();
   if (m === 'household') openHousehold();
   if (m === 'siri') openSiriSetup();
-  if (m === 'recipe') shareKitchen();
   if (m === 'export') exportBackup();
   if (m === 'import') $('#importFile').click();
   if (m === 'sample') loadSample();
