@@ -1,45 +1,49 @@
 :root {
-  /* Warm neutrals with a maroon accent */
-  --bg: #f4ede3;
-  --card: #fffaf3;
-  --ink: #2e231d;
-  --muted: #76675b;
-  --line: #e4d8c8;
-  --accent: #6e2a2a;
-  --accent-ink: #fffaf3;
-  --accent-soft: #f0e0d8;
-  --go: #6b7444;
-  --warn: #9a5b22;
-  --warn-soft: #f5e6d1;
-  --danger: #b0352b;
-  --danger-soft: #f7dfd9;
-  --toast-bg: #2e231d;
-  --toast-ink: #f4ede3;
-  --toast-accent: #e7b6a4;
-  --shadow: 0 6px 24px rgba(60, 36, 20, .14);
+  /* The Fifth Key palette: ivory, sand, taupe, walnut, espresso, gold */
+  --bg: #efe8dd;
+  --card: #f8f4ec;
+  --ink: #1f1a16;
+  --muted: #7d7268;
+  --line: #ddd2c2;
+  --accent: #2a221c;
+  --accent-ink: #f3ece0;
+  --accent-soft: #e7dccb;
+  --gold: #a8823f;
+  --go: #a8823f;
+  --warn: #8a5a2b;
+  --warn-soft: #f0e3cf;
+  --danger: #9c3b2e;
+  --danger-soft: #f3ddd6;
+  --toast-bg: #2a221c;
+  --toast-ink: #f3ece0;
+  --toast-accent: #d4b06a;
+  --shadow: 0 8px 28px rgba(42, 30, 18, .14);
+  --serif: "Cormorant Garamond", "Iowan Old Style", Georgia, serif;
+  --caps: "Jost", -apple-system, "Helvetica Neue", sans-serif;
   --radius: 14px;
   --tabbar-h: 72px;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #1b1613;
-    --card: #251e1a;
-    --ink: #f1e7dc;
-    --muted: #b2a191;
-    --line: #3b3029;
-    --accent: #cf8a78;
-    --accent-ink: #1b1613;
-    --accent-soft: #3c2622;
-    --go: #a4ad78;
-    --warn: #dba468;
-    --warn-soft: #3b2c1c;
-    --danger: #e58a7d;
-    --danger-soft: #3f201d;
-    --toast-bg: #f1e7dc;
-    --toast-ink: #1b1613;
-    --toast-accent: #6e2a2a;
-    --shadow: 0 6px 24px rgba(0, 0, 0, .5);
+    --bg: #15110e;
+    --card: #211b16;
+    --ink: #efe8dd;
+    --muted: #a99c8e;
+    --line: #362d25;
+    --accent: #c8a15a;
+    --accent-ink: #15110e;
+    --accent-soft: #33281c;
+    --gold: #c8a15a;
+    --go: #b08a48;
+    --warn: #d4a464;
+    --warn-soft: #382a1b;
+    --danger: #d98a7c;
+    --danger-soft: #3b1f1a;
+    --toast-bg: #efe8dd;
+    --toast-ink: #15110e;
+    --toast-accent: #7a5a24;
+    --shadow: 0 8px 28px rgba(0, 0, 0, .55);
     color-scheme: dark;
   }
 }
@@ -434,3 +438,30 @@ body.editing .top, body.editing .tabbar { display: none; }
   padding-right: 34px; background-repeat: no-repeat; background-position: right 12px center; background-size: 12px;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5l5 5 5-5' fill='none' stroke='%23888' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
 }
+
+/* Brand type: serif titles, letterspaced capitals for labels and small headings */
+h1 { font-family: var(--serif); font-weight: 500; font-size: 30px; letter-spacing: .14em; text-transform: uppercase; display: flex; align-items: center; gap: 10px; }
+h1 .mark { width: 22px; height: 36px; color: var(--gold); flex: none; }
+h2.group, .label, .form label, .tab span, .action span, .chip, .shop-head h2, .sheet-head h2, .page-head h2, .empty h2, .card h3, .drop-tray p {
+  font-family: var(--caps); letter-spacing: .12em;
+}
+h2.group { color: var(--gold); font-weight: 500; letter-spacing: .2em; }
+.sheet-head h2, .page-head h2, .empty h2, .card h3, .shop-head h2 { font-family: var(--serif); font-weight: 600; letter-spacing: .06em; font-size: 22px; }
+.page-head h2 { font-size: 19px; }
+.name { font-family: var(--serif); font-size: 18px; font-weight: 600; letter-spacing: .01em; }
+.action svg { background: var(--accent); color: var(--gold); box-shadow: 0 6px 18px rgba(42, 30, 18, .3); }
+.action span { color: var(--ink); }
+.tab.on { color: var(--gold); }
+.badge { background: var(--gold); color: #fff; }
+.chip.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.btn.primary, .primary, .quick-add button, .type-form button, .mic { background: var(--accent); color: var(--accent-ink); }
+.link, .form summary { color: var(--gold); }
+.check, .stepper button { color: var(--gold); }
+.qty { font-family: var(--serif); font-size: 21px; font-variant-numeric: lining-nums tabular-nums; }
+.qty small { font-family: var(--caps); letter-spacing: .04em; }
+.toast button { color: var(--toast-accent); }
+@media (prefers-color-scheme: dark) {
+  .action svg { color: var(--accent-ink); }
+  .badge { color: var(--accent-ink); }
+}
+body { font-variant-numeric: lining-nums; }

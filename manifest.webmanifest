@@ -4,8 +4,8 @@
   "description": "Know what you have at home: pantry, bathroom, garage.",
   "start_url": "./",
   "display": "standalone",
-  "background_color": "#f4ede3",
-  "theme_color": "#6e2a2a",
+  "background_color": "#efe8dd",
+  "theme_color": "#2a221c",
   "icons": [
     { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml" },
     { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
