@@ -95,6 +95,12 @@ h1 { font-size: 28px; margin: 4px 0 10px; letter-spacing: -.02em; }
 
 main { max-width: 600px; margin: 0 auto; padding: 0 16px; }
 h2.group { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 18px 4px 8px; display: flex; justify-content: space-between; }
+.fold { all: unset; flex: 1; display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 32px; margin: -6px 0; cursor: pointer;
+  -webkit-tap-highlight-color: transparent; }
+.fold:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; border-radius: 4px; }
+.fold-meta { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; letter-spacing: .12em; }
+.fold svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; transition: transform .2s; }
+.fold.shut svg { transform: rotate(-90deg); }
 
 /* Item rows */
 .list { list-style: none; margin: 0; padding: 0; background: var(--card); border-radius: var(--radius); overflow: hidden; border: 1px solid var(--line); }

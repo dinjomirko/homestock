@@ -1,11 +1,11 @@
 import {
   parseCommand, resolveActions, matchItem, matchExact, guessLocation, guessEmoji, parsePack, parseListLines,
   suggestShelfLife, openLife, isoDate, DEFAULT_LOCATIONS,
-} from './parser.js?v=27';
+} from './parser.js?v=28';
 import {
   initSync, pushSoon, syncInfo, createHousehold, joinHousehold, leaveHousehold, authenticate, useHousehold, signOut,
   removeMember, newJoinCode, renameMe,
-} from './sync.js?v=27';
+} from './sync.js?v=28';
 
 const APP_VERSION = new URL(import.meta.url).searchParams.get('v') || 'dev';
 const STORAGE_KEY = 'homestock.v1';
@@ -32,7 +32,7 @@ const buzz = (ms = 30) => navigator.vibrate?.(ms);
 // ---------- State ----------
 
 let state = load(STORAGE_KEY, { items: [] });
-const prefs = { scanMode: 'add', sound: true, stores: ['Costco', 'Aldi', 'Target', 'Walmart'], places: [...DEFAULT_LOCATIONS], subPlaces: {}, ...load(PREFS_KEY, {}) };
+const prefs = { scanMode: 'add', sound: true, stores: ['Costco', 'Aldi', 'Target', 'Walmart'], places: [...DEFAULT_LOCATIONS], subPlaces: {}, folded: [], ...load(PREFS_KEY, {}) };
 delete prefs.shopStore; // the store filter used to be remembered between launches; now it isn't
 // shopStore: the store picked at the top of the shopping list, for this visit only.
 const ui = { view: 'stock', loc: 'All', q: '', bought: new Map(), flash: null, editor: null, paste: null, account: null, shopStore: 'all' };
@@ -368,7 +368,12 @@ function renderStock() {
     html = allLocations()
       .map((loc) => {
         const group = items.filter((i) => shownIn(i).includes(loc));
-        return group.length ? `<h2 class="group">${esc(loc)}</h2><ul class="list">${placeList(group, loc)}</ul>` : '';
+        if (!group.length) return '';
+        // Tap a place's heading to fold it away; folding is per phone, not shared.
+        const folded = prefs.folded.includes(loc);
+        return `<h2 class="group"><button class="fold ${folded ? 'shut' : ''}" data-fold="${esc(loc)}" aria-expanded="${!folded}">
+            <span>${esc(loc)}</span><span class="fold-meta">${folded ? `${group.length} item${group.length === 1 ? '' : 's'}` : ''}<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></span>
+          </button></h2>${folded ? '' : `<ul class="list">${placeList(group, loc)}</ul>`}`;
       })
       .join('');
   } else {
@@ -1473,6 +1478,7 @@ function renamePlace(from, to) {
     }
   }
   prefs.places = [...new Set(allLocations().map((pl) => (pl === from ? to : pl)))];
+  prefs.folded = prefs.folded.map((pl) => (pl === from ? to : pl));
 }
 
 function placeAction(e) {
@@ -2584,6 +2590,13 @@ $('#main').addEventListener('click', (e) => {
   const storeChip = e.target.closest('[data-shop-store]');
   if (storeChip) {
     ui.shopStore = storeChip.dataset.shopStore;
+    return render();
+  }
+  const fold = e.target.closest('[data-fold]');
+  if (fold) {
+    const place = fold.dataset.fold;
+    prefs.folded = prefs.folded.includes(place) ? prefs.folded.filter((p) => p !== place) : [...prefs.folded, place];
+    savePrefs();
     return render();
   }
   const btn = e.target.closest('[data-act]');
