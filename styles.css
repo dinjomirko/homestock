@@ -342,3 +342,25 @@ body.editing .top, body.editing .tabbar { display: none; }
 .found .note { margin: 0; font-size: 14px; }
 .editor .pick button:not(.on), .editor input, .editor select, .editor .stepper.big { background: var(--card); }
 .editor .stepper.big input { background: none; }
+
+/* Letter badge for items without a photo */
+.thumb .mono { font-size: 18px; font-weight: 700; color: var(--accent); }
+.thumb:has(.mono) { background: var(--accent-soft); }
+
+/* Stock rows swipe green to put something on the list */
+.swipe-row.to-list { background: var(--accent); }
+.swipe-row.to-list .swipe-label { color: var(--accent-ink); }
+.stepper button:disabled { color: var(--muted); opacity: .35; }
+
+/* Store filter on the shopping list */
+.shop-stores { padding: 2px 0 10px; }
+
+/* Share sheet */
+.steps { margin: 6px 0 12px; padding-left: 22px; font-size: 15px; line-height: 1.45; }
+.steps li { margin: 6px 0; }
+.share-preview {
+  margin: 0; max-height: 34vh; overflow: auto; white-space: pre-wrap; font-family: inherit; font-size: 15px; line-height: 1.5;
+  background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px;
+}
+.row-actions { display: flex; gap: 10px; margin-top: 14px; }
+.row-actions .btn { flex: 1; min-height: 50px; }

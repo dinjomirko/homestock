@@ -2,7 +2,6 @@ import { parseCommand, resolveActions, matchItem, guessLocation, parsePack, DEFA
 
 const STORAGE_KEY = 'homestock.v1';
 const PREFS_KEY = 'homestock.prefs';
-const LOC_ICONS = { Pantry: '🥫', Fridge: '🥛', Freezer: '🧊', Bathroom: '🧴', Garage: '🧰' };
 const KITCHEN = ['Pantry', 'Fridge', 'Freezer'];
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 
@@ -12,12 +11,13 @@ const round = (n) => Math.round(n * 100) / 100;
 const fmt = (n) => (n === 0.5 ? '½' : String(round(n)));
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 const sentenceCase = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+const titleCase = (s) => s.trim().replace(/(^|\s)\S/g, (c) => c.toUpperCase());
 const buzz = (ms = 30) => navigator.vibrate?.(ms);
 
 // ---------- State ----------
 
 let state = load(STORAGE_KEY, { items: [] });
-const prefs = { scanMode: 'add', sound: true, ...load(PREFS_KEY, {}) };
+const prefs = { scanMode: 'add', sound: true, stores: ['Costco', 'Aldi', 'Target', 'Walmart'], shopStore: 'all', ...load(PREFS_KEY, {}) };
 const ui = { view: 'stock', loc: 'All', q: '', bought: new Map(), flash: null, editor: null };
 const undoStack = [];
 
@@ -77,6 +77,16 @@ function newItem(fields) {
 const byId = (id) => state.items.find((i) => i.id === id);
 const isLow = (it) => it.need || (it.low != null && it.qty <= it.low && it.skipAt !== it.qty);
 const shoppingItems = () => state.items.filter(isLow).sort((a, b) => a.location.localeCompare(b.location) || a.name.localeCompare(b.name));
+
+function allStores() {
+  return [...new Set([...prefs.stores, ...state.items.map((i) => i.store).filter(Boolean)])];
+}
+
+// The store chosen at the top of the shopping list, or 'all'.
+function shopStore() {
+  const s = prefs.shopStore;
+  return s && s !== 'all' && allStores().includes(s) ? s : 'all';
+}
 
 function allLocations() {
   return [...new Set([...DEFAULT_LOCATIONS, ...state.items.map((i) => i.location)])];
@@ -149,22 +159,27 @@ function render() {
 }
 
 function thumb(it, asButton = true) {
-  const inner = it.image ? `<img src="${esc(it.image)}" alt="" loading="lazy">` : LOC_ICONS[it.location] || '📦';
+  const inner = it.image ? `<img src="${esc(it.image)}" alt="" loading="lazy">` : `<span class="mono">${esc((it.name || '?').charAt(0).toUpperCase())}</span>`;
   return asButton
     ? `<button class="thumb" data-act="edit" aria-label="Edit ${esc(it.name)}">${inner}</button>`
     : `<div class="thumb" aria-hidden="true">${inner}</div>`;
 }
 
 function itemRow(it, showLoc) {
-  const cls = it.qty <= 0 ? 'out' : isLow(it) ? 'low' : '';
-  const meta = [esc(it.brand), showLoc ? esc(it.location) : '', useByHtml(it)].filter(Boolean).join(' · ');
-  return `<li class="item ${ui.flash === it.id ? 'flash' : ''}" data-id="${it.id}">
-    ${thumb(it)}
-    <button class="info" data-act="edit"><div class="name">${esc(it.name)}</div>${meta ? `<div class="meta">${meta}</div>` : ''}</button>
-    <div class="stepper">
-      <button data-act="dec" aria-label="One less ${esc(it.name)}">−</button>
-      <span class="qty ${cls}" aria-label="${esc(qtyText(it))}">${fmt(it.qty)}${it.unit ? `<small>${esc(pluralUnit(it.unit, it.qty))}</small>` : ''}</span>
-      <button data-act="inc" aria-label="One more ${esc(it.name)}">+</button>
+  const listed = isLow(it);
+  const cls = it.qty <= 0 ? 'out' : listed ? 'low' : '';
+  const meta = [esc(it.brand), showLoc ? esc(it.location) : '', useByHtml(it), listed ? '<span class="warn">On list</span>' : '']
+    .filter(Boolean).join(' · ');
+  return `<li class="swipe-row swipeable ${listed ? '' : 'to-list'}" data-id="${it.id}" data-swipe="${listed ? 'unlist' : 'tolist'}">
+    <span class="swipe-label" aria-hidden="true">${listed ? 'Off the list' : 'Add to list'}</span>
+    <div class="item ${ui.flash === it.id ? 'flash' : ''}">
+      ${thumb(it)}
+      <button class="info" data-act="edit"><div class="name">${esc(it.name)}</div>${meta ? `<div class="meta">${meta}</div>` : ''}</button>
+      <div class="stepper">
+        <button data-act="dec" aria-label="One less ${esc(it.name)}" ${it.qty <= 0 ? 'disabled' : ''}>−</button>
+        <span class="qty ${cls}" aria-label="${esc(qtyText(it))}">${fmt(it.qty)}${it.unit ? `<small>${esc(pluralUnit(it.unit, it.qty))}</small>` : ''}</span>
+        <button data-act="inc" aria-label="One more ${esc(it.name)}">+</button>
+      </div>
     </div>
   </li>`;
 }
@@ -225,41 +240,67 @@ function renderChips() {
 }
 
 function shopRow(it, bought) {
-  const status = it.listOnly ? 'Not in stock' : it.qty <= 0 ? 'out' : `${esc(qtyText(it))} left`;
-  return `<li class="swipe-row ${bought ? '' : 'swipeable'}" data-id="${it.id}">
+  const status = it.listOnly ? 'Not in stock' : it.qty <= 0 ? 'Out' : `${esc(qtyText(it))} left`;
+  const meta = bought ? `Back in stock · ${esc(qtyText(it))}` : `${status} · ${esc(it.location)}`;
+  return `<li class="swipe-row ${bought ? '' : 'swipeable'}" data-id="${it.id}" data-swipe="unlist">
     ${bought ? '' : '<span class="swipe-label" aria-hidden="true">Remove</span>'}
     <div class="item ${bought ? 'bought' : ''} ${ui.flash === it.id ? 'flash' : ''}">
       <button class="check" data-act="${bought ? 'unbuy' : 'got'}" role="checkbox" aria-checked="${bought}" aria-label="${esc(it.name)}">
         <svg viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></svg></button>
-      <button class="info" data-act="edit"><div class="name">${esc(it.name)}</div>
-        <div class="meta">${bought ? `Back in stock · ${esc(qtyText(it))}` : status}${it.brand ? ` · ${esc(it.brand)}` : ''}</div></button>
+      <button class="info" data-act="edit"><div class="name">${esc(it.name)}</div><div class="meta">${meta}</div></button>
       ${bought ? '' : `<button class="remove" data-act="unlist" aria-label="Remove ${esc(it.name)} from the list">
         <svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17"/></svg></button>`}
     </div>
   </li>`;
 }
 
+const byPlace = (a, b) => a.location.localeCompare(b.location) || a.name.localeCompare(b.name);
+
+// What's on the list for the chosen store: that store's items plus anything not tied to a store.
+function listForStore(store) {
+  const items = shoppingItems().filter((i) => !ui.bought.has(i.id));
+  return store === 'all' ? items : items.filter((i) => i.store === store || !i.store);
+}
+
 function renderShop() {
-  const toBuy = shoppingItems().filter((i) => !ui.bought.has(i.id));
+  const all = listForStore('all');
   const bought = [...ui.bought.keys()].map(byId).filter(Boolean);
-  let html = `<form class="quick-add" id="listAdd">
-      <input name="what" placeholder="Add to the list…" autocomplete="off" enterkeyhint="done" aria-label="Add to the shopping list">
+  const stores = allStores();
+  const sel = shopStore();
+  const counts = {};
+  all.forEach((i) => (counts[i.store || ''] = (counts[i.store || ''] || 0) + 1));
+  let html = '';
+  if (all.some((i) => i.store) || sel !== 'all') {
+    const chip = (key, label, n) =>
+      `<button class="chip ${sel === key ? 'on' : ''}" data-shop-store="${esc(key)}" aria-pressed="${sel === key}">${esc(label)}${n ? `<small>${n}</small>` : ''}</button>`;
+    html += `<nav class="chips shop-stores" aria-label="Store">${chip('all', 'All stores', all.length)}${stores
+      .filter((st) => counts[st] || st === sel)
+      .map((st) => chip(st, st, counts[st]))
+      .join('')}</nav>`;
+  }
+  html += `<form class="quick-add" id="listAdd">
+      <input name="what" placeholder="${sel === 'all' ? 'Add to the list…' : `Add to the ${esc(sel)} list…`}" autocomplete="off" enterkeyhint="done" aria-label="Add to the shopping list">
       <button>Add</button>
     </form>`;
-  if (toBuy.length) {
-    html += `<div class="shop-head"><h2>${toBuy.length} to buy</h2><button class="btn small" data-act="share-list">Share</button></div>`;
-    for (const loc of allLocations()) {
-      const group = toBuy.filter((i) => i.location === loc);
-      if (group.length) html += `<h2 class="group">${esc(loc)}</h2><ul class="list shop-list">${group.map((i) => shopRow(i, false)).join('')}</ul>`;
+  const visible = listForStore(sel);
+  if (visible.length) {
+    html += `<div class="shop-head"><h2>${visible.length} to buy${sel === 'all' ? '' : ` at ${esc(sel)}`}</h2>
+      <button class="btn small" data-act="share-list">Share</button></div>`;
+    const groups = (sel === 'all' ? stores.map((st) => [st, all.filter((i) => i.store === st)]) : [[sel, visible.filter((i) => i.store === sel)]])
+      .concat([['Any store', visible.filter((i) => !i.store)]])
+      .filter(([, g]) => g.length);
+    for (const [name, g] of groups) {
+      if (groups.length > 1) html += `<h2 class="group">${esc(name)}</h2>`;
+      html += `<ul class="list shop-list">${g.sort(byPlace).map((i) => shopRow(i, false)).join('')}</ul>`;
     }
   } else if (!bought.length) {
-    html += `<div class="empty"><div class="big">🛒</div><h2>Nothing to buy</h2>
-      <p>Things land here on their own when they run low. You can also say “add coffee to the shopping list.”</p></div>`;
+    html += `<div class="empty"><div class="big">🛒</div><h2>Nothing to buy${sel === 'all' ? '' : ` at ${esc(sel)}`}</h2>
+      <p>Things land here on their own when they run low. You can also say “add coffee to the ${sel === 'all' ? 'shopping' : esc(sel)} list.”</p></div>`;
   }
   if (bought.length) {
     html += `<h2 class="group"><span>In the cart · back in stock</span></h2><ul class="list shop-list">${bought.map((i) => shopRow(i, true)).join('')}</ul>
       <p class="note" style="margin:8px 4px">Tapped one by mistake? Tap it again.</p>`;
-  } else if (toBuy.length) {
+  } else if (visible.length && !prefs.swipeTipSeen) {
     html += '<p class="note" style="margin:8px 4px">Tick things off as you shop. Swipe left or tap ✕ to take something off the list.</p>';
   }
   const kitchen = state.items.filter((i) => KITCHEN.includes(i.location) && i.qty > 0).length;
@@ -315,12 +356,27 @@ function removeFromList(it) {
   checkpoint();
   unlist(it);
   buzz(15);
+  if (!prefs.swipeTipSeen) {
+    prefs.swipeTipSeen = true;
+    savePrefs();
+  }
   save();
   toast(`Removed ${it.name} from the list`, { undo: true });
 }
 
+function putOnList(it) {
+  if (!it) return;
+  checkpoint();
+  it.need = true;
+  it.updated = Date.now();
+  buzz(15);
+  save();
+  toast(`Added ${it.name} to the list`, { undo: true });
+}
+
 function addToList(text) {
-  const actions = resolveActions(parseCommand(`need ${text}`), state.items);
+  const sel = shopStore();
+  const actions = resolveActions(parseCommand(`need ${text}`, { locations: allLocations(), stores: allStores() }), state.items);
   if (!actions.length) return;
   checkpoint();
   for (const a of actions) {
@@ -329,6 +385,8 @@ function addToList(text) {
       it = newItem({ name: sentenceCase(a.name), qty: 0, location: guessLocation(a.name), listOnly: true });
       state.items.push(it);
     }
+    if (a.store) it.store = a.store;
+    else if (sel !== 'all' && !it.store) it.store = sel;
     it.need = true;
     it.updated = Date.now();
     ui.bought.delete(it.id);
@@ -393,6 +451,7 @@ function applyActions(actions) {
         continue;
     }
     if (a.unit && !it.unit) it.unit = a.unit;
+    if (a.store) it.store = a.store;
     it.updated = Date.now();
   }
   if (done.length) save();
@@ -415,7 +474,7 @@ function runCommand(texts) {
   const locations = allLocations();
   let best = null;
   for (const t of texts) {
-    const r = resolveActions(parseCommand(t, { locations }), state.items);
+    const r = resolveActions(parseCommand(t, { locations, stores: allStores() }), state.items);
     const score = r.filter((a) => a.action && (a.item || a.action !== 'remove')).length * 2 + r.filter((a) => a.item).length;
     if (r.length && (!best || score > best.score)) best = { r, score };
   }
@@ -469,6 +528,9 @@ function chipPicker(field, options, current, { label, other, scroll = false, tex
 const locationPicker = (current, scroll) =>
   chipPicker('location', allLocations(), current, { label: 'Kept in', scroll, other: { label: '+ New place', ask: 'Name the new place (e.g. Basement, Laundry room)' } });
 
+const storePicker = (current) =>
+  chipPicker('store', ['', ...allStores()], current, { label: 'Buy at', text: (v) => v || 'Any store', other: { label: '+ New store', ask: 'Store name (e.g. Costco, Aldi)' } });
+
 const unitPicker = (current) =>
   chipPicker('unit', UNIT_CHOICES, current, { label: 'Counted in', scroll: true, text: (v) => v || 'each', other: { label: 'Other…', ask: 'Counted in what? (e.g. tube, carton, pound)' } });
 
@@ -481,7 +543,7 @@ document.addEventListener('click', (e) => {
   if (value === '__new') {
     value = prompt(b.dataset.ask)?.trim();
     if (!value) return;
-    value = field === 'unit' ? singularUnit(value) : sentenceCase(value);
+    value = field === 'unit' ? singularUnit(value) : field === 'store' ? titleCase(value) : sentenceCase(value);
     if (!group.querySelector(`[data-value="${CSS.escape(value)}"]`)) {
       b.insertAdjacentHTML('beforebegin', `<button type="button" role="radio" data-pick="${field}" data-value="${esc(value)}">${esc(value)}</button>`);
     }
@@ -537,6 +599,8 @@ function renderEditor() {
     </div>
     <span class="label">Kept in</span>
     ${locationPicker(item.location)}
+    <span class="label">Buy at</span>
+    ${storePicker(item.store || '')}
     <label>Use by <span style="font-weight:400">(optional)</span><input name="useBy" type="date" value="${esc(item.useBy || '')}"></label>
     <details><summary>Shopping & scanning</summary>
       <div class="row2">
@@ -584,11 +648,13 @@ $('#main').addEventListener('submit', (e) => {
     return;
   }
   checkpoint();
+  const qtyBefore = item.qty;
   Object.assign(item, {
     name: sentenceCase(name),
     qty: Math.max(0, parseFloat(form.qty.value) || 0),
     unit: singularUnit(form.unit.value),
     location: form.location.value,
+    store: form.store.value,
     useBy: form.useBy.value,
     low: form.low.value === '' ? null : Number(form.low.value),
     scanQty: Math.max(1, parseInt(form.scanQty.value, 10) || 1),
@@ -596,7 +662,12 @@ $('#main').addEventListener('submit', (e) => {
     barcode: normCode(form.barcode.value),
     updated: Date.now(),
   });
-  if (item.qty > (item.low ?? -1)) item.need = false;
+  // Restocking clears a list request; just editing other details doesn't.
+  if (item.qty > qtyBefore && item.qty > (item.low ?? -1)) item.need = false;
+  if (item.store && !prefs.stores.includes(item.store)) {
+    prefs.stores.push(item.store);
+    savePrefs();
+  }
   if (isNew) state.items.push(item);
   ui.flash = item.id;
   save();
@@ -609,6 +680,7 @@ function openMenu() {
     <div class="sheet-head"><h2>Options</h2><button class="link" data-close>Done</button></div>
     <div class="menu">
       <button data-menu="add">Add an item by hand</button>
+      <button data-menu="stores">Stores</button>
       <button data-menu="recipe">Copy kitchen list for recipe ideas</button>
       <button data-menu="sound">Scan beep: ${prefs.sound ? 'On' : 'Off'}</button>
       <button data-menu="export">Back up to a file</button>
@@ -632,9 +704,34 @@ async function shareText(text, title) {
   }
 }
 
+function openStores() {
+  const count = (st) => state.items.filter((i) => i.store === st).length;
+  openSheet(`
+    <div class="sheet-head"><h2>Stores</h2><button class="link" data-close>Done</button></div>
+    <p class="note">Tag items with where you buy them on the item’s page. In the store, pick it at the top of the shopping list to see just what to get there.</p>
+    <ul class="list" style="margin-top:12px">${allStores()
+      .map((st) => `<li class="item"><div class="info"><div class="name">${esc(st)}</div><div class="meta">${count(st)} item${count(st) === 1 ? '' : 's'}</div></div>
+        <button class="remove" data-store-del="${esc(st)}" aria-label="Remove ${esc(st)}"><svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17"/></svg></button></li>`)
+      .join('')}</ul>
+    <button class="add-row" data-store-add>+ Add a store</button>`);
+}
+
+// Plain lines, one item each, so Notes can turn them into a checklist in one tap.
 function shareShoppingList() {
-  const lines = shoppingItems().map((it) => `☐ ${it.name}${it.brand ? ` (${it.brand})` : ''}`);
-  shareText(`Shopping list\n${lines.join('\n')}`, 'Shopping list');
+  const sel = shopStore();
+  const title = sel === 'all' ? 'Shopping list' : `${sel} list`;
+  const items = listForStore(sel).sort((a, b) => !a.store - !b.store || (a.store || '').localeCompare(b.store || '') || byPlace(a, b));
+  const text = `${title}\n${items.map((it) => it.name + (sel === 'all' && it.store ? ` – ${it.store}` : '')).join('\n')}`;
+  openSheet(`
+    <div class="sheet-head"><h2>Share ${sel === 'all' ? 'shopping list' : `${esc(sel)} list`}</h2><button class="link" data-close>Done</button></div>
+    <ol class="steps">
+      <li>Tap <b>Share</b>, then <b>Notes</b>.</li>
+      <li>On the Notes card, tap where it says <b>New Note</b> to choose the note you want it added to.</li>
+      <li>In that note, select the items and tap the <b>checklist</b> button (circle with a check mark) to make them checkable.</li>
+    </ol>
+    <pre class="share-preview">${esc(text)}</pre>
+    <div class="row-actions"><button class="btn" data-share="copy">Copy</button><button class="btn primary" data-share="send">Share…</button></div>`);
+  $('#sheet')._shareText = text;
 }
 
 function shareKitchen() {
@@ -675,22 +772,22 @@ function loadSample() {
   const inDays = (n) => new Date(Date.now() + n * 864e5).toISOString().slice(0, 10);
   const s = (name, qty, unit, location, extra = {}) => newItem({ name, qty, unit, location, ...extra });
   state.items.push(
-    s('Paper towels', 6, 'roll', 'Pantry', { brand: 'Bounty', scanQty: 6, low: 2 }),
+    s('Paper towels', 6, 'roll', 'Pantry', { brand: 'Bounty', scanQty: 6, low: 2, store: 'Costco' }),
     s('Diced tomatoes', 4, 'can', 'Pantry'),
     s('Spaghetti', 2, 'box', 'Pantry'),
     s('Black beans', 3, 'can', 'Pantry'),
-    s('Olive oil', 1, 'bottle', 'Pantry', { low: 1 }),
+    s('Olive oil', 1, 'bottle', 'Pantry', { low: 1, store: 'Aldi' }),
     s('Rice', 1, 'bag', 'Pantry', { low: 0 }),
-    s('Milk', 1, 'gallon', 'Fridge', { low: 1, useBy: inDays(3) }),
-    s('Eggs', 12, '', 'Fridge', { scanQty: 12, low: 4, useBy: inDays(12) }),
+    s('Milk', 1, 'gallon', 'Fridge', { low: 1, useBy: inDays(3), store: 'Aldi' }),
+    s('Eggs', 12, '', 'Fridge', { scanQty: 12, low: 4, useBy: inDays(12), store: 'Aldi' }),
     s('Cheddar cheese', 1, 'block', 'Fridge', { low: 0 }),
     s('Spinach', 1, 'bag', 'Fridge', { low: 0, useBy: inDays(1) }),
     s('Frozen peas', 2, 'bag', 'Freezer'),
-    s('Toilet paper', 9, 'roll', 'Bathroom', { brand: 'Charmin', scanQty: 12, low: 4 }),
+    s('Toilet paper', 9, 'roll', 'Bathroom', { brand: 'Charmin', scanQty: 12, low: 4, store: 'Costco' }),
     s('Toothpaste', 1, 'tube', 'Bathroom', { low: 1 }),
     s('Shampoo', 1, 'bottle', 'Bathroom', { low: 0 }),
     s('Duct tape', 2, 'roll', 'Garage'),
-    s('AA batteries', 8, '', 'Garage', { low: 4 }),
+    s('AA batteries', 8, '', 'Garage', { low: 4, store: 'Costco' }),
     s('Wood screws 1-5/8"', 1, 'box', 'Garage'),
     s('Furnace filter 16x25x1', 0, '', 'Garage'),
   );
@@ -719,7 +816,7 @@ function openVoice() {
         <button type="button">Removing a roll of paper towels</button><button type="button">Used 2 cans of tomatoes and a box of spaghetti</button>
         <button type="button">Bought a dozen eggs</button><button type="button">We're out of milk</button>
         <button type="button">How many rolls of toilet paper do we have?</button><button type="button">We have 3 rolls of duct tape</button>
-        <button type="button">Add coffee to the shopping list</button><button type="button">Take coffee off the list</button>
+        <button type="button">Add coffee to the shopping list</button><button type="button">Take coffee off the list</button><button type="button">Add eggs to the Costco list</button>
       </div>
     </div>`, () => {
     stopListening();
@@ -1361,6 +1458,12 @@ document.addEventListener('click', (e) => {
 });
 
 $('#main').addEventListener('click', (e) => {
+  const storeChip = e.target.closest('[data-shop-store]');
+  if (storeChip) {
+    prefs.shopStore = storeChip.dataset.shopStore;
+    savePrefs();
+    return render();
+  }
   const btn = e.target.closest('[data-act]');
   if (!btn || Date.now() - lastSwipeAt < 400) return;
   const item = byId(btn.closest('[data-id]')?.dataset.id);
@@ -1418,8 +1521,17 @@ function endSwipe(e) {
   lastSwipeAt = Date.now();
   item.style.transition = 'transform .18s ease-out';
   if (dx < -SWIPE_REMOVE && e.type === 'pointerup') {
-    item.style.transform = 'translateX(-110%)';
-    setTimeout(() => removeFromList(byId(row.dataset.id)), 160);
+    const it = byId(row.dataset.id);
+    if (row.dataset.swipe === 'tolist') {
+      item.style.transform = '';
+      putOnList(it);
+    } else if (row.closest('.shop-list')) {
+      item.style.transform = 'translateX(-110%)';
+      setTimeout(() => removeFromList(it), 160);
+    } else {
+      item.style.transform = '';
+      removeFromList(it);
+    }
   } else {
     item.style.transform = '';
     row.classList.remove('armed');
@@ -1472,6 +1584,33 @@ $('#sheet').addEventListener('click', (e) => {
     $('#typeInput').focus();
     return;
   }
+  const share = e.target.closest('[data-share]')?.dataset.share;
+  if (share) {
+    const text = $('#sheet')._shareText;
+    if (share === 'send' && navigator.share) navigator.share({ text }).catch(() => {});
+    else navigator.clipboard?.writeText(text).then(() => toast('Copied — paste it into any note'), () => prompt('Copy this:', text));
+    return;
+  }
+  if (e.target.closest('[data-store-add]')) {
+    const name = titleCase(prompt('Store name (e.g. Costco, Aldi)') || '');
+    if (name && !allStores().includes(name)) {
+      prefs.stores.push(name);
+      savePrefs();
+    }
+    return openStores();
+  }
+  const del = e.target.closest('[data-store-del]')?.dataset.storeDel;
+  if (del) {
+    const tagged = state.items.filter((i) => i.store === del);
+    if (tagged.length && !confirm(`${del} is set on ${tagged.length} item${tagged.length === 1 ? '' : 's'}. Remove it from them?`)) return;
+    checkpoint();
+    tagged.forEach((i) => (i.store = ''));
+    prefs.stores = prefs.stores.filter((st) => st !== del);
+    if (prefs.shopStore === del) prefs.shopStore = 'all';
+    savePrefs();
+    save();
+    return openStores();
+  }
   const m = e.target.closest('[data-menu]')?.dataset.menu;
   if (!m) return;
   if (m === 'sound') {
@@ -1482,6 +1621,7 @@ $('#sheet').addEventListener('click', (e) => {
   }
   closeSheet();
   if (m === 'add') openEditor(newItem({ qty: 1 }), { isNew: true });
+  if (m === 'stores') openStores();
   if (m === 'recipe') shareKitchen();
   if (m === 'export') exportBackup();
   if (m === 'import') $('#importFile').click();

@@ -81,6 +81,23 @@ test('taking things off the shopping list', () => {
   assert.equal(one('add milk to the list').action, 'need');
 });
 
+test('stores: list for a store, and where something was bought', () => {
+  const stores = ['Costco', 'Aldi', "Trader Joe's"];
+  const p = (t) => {
+    const r = parseCommand(t, { stores });
+    assert.equal(r.length, 1, t);
+    return [r[0].action, r[0].qty, r[0].name, r[0].store];
+  };
+  assert.deepEqual(p('add milk to the Costco list'), ['need', null, 'milk', 'Costco']);
+  assert.deepEqual(p('put paper towels on the costco shopping list'), ['need', null, 'paper towels', 'Costco']);
+  assert.deepEqual(p('we need eggs from aldi'), ['need', null, 'eggs', 'Aldi']);
+  assert.deepEqual(p('bought 2 boxes of pasta at costco'), ['add', 2, 'pasta', 'Costco']);
+  assert.deepEqual(p('take milk off the aldi list'), ['unlist', null, 'milk', 'Aldi']);
+  assert.deepEqual(p('add bananas to the trader joes list'), ['need', null, 'bananas', "Trader Joe's"]);
+  // An unknown store name doesn't swallow the item.
+  assert.deepEqual(p('add milk to the list'), ['need', null, 'milk', undefined]);
+});
+
 test('location at the end of a sentence', () => {
   const a = one('Took 2 cans of paint out of the garage');
   assert.deepEqual([a.action, a.qty, a.name, a.location], ['remove', 2, 'paint', 'Garage']);

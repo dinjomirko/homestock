@@ -70,7 +70,7 @@ const STOCK_WORDS = new Set([
   'storage', 'stash', 'house', 'home',
 ]);
 
-const TAIL = /^(.*\S)\s+(?:from|to|into|in|on|onto|off of|off|out of|back to|back in|back into)\s+(?:the |my |our |a )?([a-z' ]+)$/;
+const TAIL = /^(.*\S)\s+(?:from|to|into|in|on|onto|at|off of|off|out of|back to|back in|back into)\s+(?:the |my |our |a )?([a-z' ]+)$/;
 
 const numOf = (t) => {
   if (/^\d+(\.\d+)?$/.test(t)) return parseFloat(t);
@@ -99,6 +99,8 @@ function startsNewClause(words) {
 export function parseCommand(text, opts = {}) {
   const locations = opts.locations || DEFAULT_LOCATIONS;
   const locByLower = new Map(locations.map((l) => [l.toLowerCase(), l]));
+  // Stores match without apostrophes, since speech often drops them ("trader joes").
+  const stores = new Map((opts.stores || []).map((st) => [storeKey(st), st]));
   const clean = String(text)
     .toLowerCase()
     .replace(/[’‘]/g, "'")
@@ -109,7 +111,7 @@ export function parseCommand(text, opts = {}) {
     .trim();
   if (!clean) return [];
 
-  const query = parseQuery(clean, locByLower);
+  const query = parseQuery(clean, locByLower, stores);
   if (query) return [query];
 
   // Split into clauses on commas/"then", and on "and" only when what follows starts a new
@@ -132,7 +134,7 @@ export function parseCommand(text, opts = {}) {
   const actions = [];
   let prevAction = null;
   for (const clause of clauses) {
-    const a = parseClause(clause, prevAction, locByLower);
+    const a = parseClause(clause, prevAction, locByLower, stores);
     if (!a) continue;
     prevAction = a.action;
     actions.push(a);
@@ -143,7 +145,7 @@ export function parseCommand(text, opts = {}) {
 // Questions don't change anything: "how many paper towels do we have", "do we have eggs".
 const QUESTION = /^(?:(?:hey|ok|okay|so|um|uh)\s+)*(?:how many|how much|do we have|do i have|do we still have|have we got|have i got|is there|are there|got any|where is|where are|where's|wheres|check on|check)\s+(.+)$/;
 
-function parseQuery(clean, locByLower) {
+function parseQuery(clean, locByLower, stores) {
   const m = clean.match(QUESTION);
   if (!m) return null;
   const rest = m[1]
@@ -152,11 +154,13 @@ function parseQuery(clean, locByLower) {
     .replace(/\s+(?:is|are)$/, '')
     .replace(/\s+/g, ' ')
     .trim();
-  const a = parseClause(rest, 'query', locByLower);
+  const a = parseClause(rest, 'query', locByLower, stores);
   return a && { ...a, action: 'query', qty: null };
 }
 
-function parseClause(clause, prevAction, locByLower) {
+const storeKey = (s) => s.toLowerCase().replace(/'/g, '').trim();
+
+function parseClause(clause, prevAction, locByLower, stores = new Map()) {
   let s = stripFiller(clause.split(' ')).join(' ');
   let action = null;
   const m = matchPhrase(s);
@@ -165,13 +169,18 @@ function parseClause(clause, prevAction, locByLower) {
     s = m.rest;
   }
 
-  // Trailing "from the stock" / "in the garage" / "to the shopping list".
+  // Trailing "from the stock" / "in the garage" / "to the (Costco) shopping list" / "at Aldi".
   let location = null;
+  let store = null;
   for (let k = 0; k < 3; k++) {
     const t = s.match(TAIL);
     if (!t) break;
     const tail = t[2].trim();
-    if (/^(?:shopping |grocery )?list$/.test(tail)) action = action === 'remove' || action === 'unlist' ? 'unlist' : 'need';
+    const list = tail.match(/^(?:(.+?) )?(?:shopping |grocery )?list$/);
+    if (list) {
+      action = action === 'remove' || action === 'unlist' ? 'unlist' : 'need';
+      if (list[1] && stores.has(storeKey(list[1]))) store = stores.get(storeKey(list[1]));
+    } else if (stores.has(storeKey(tail))) store = stores.get(storeKey(tail));
     else if (locByLower.has(tail)) location = locByLower.get(tail);
     else if (!STOCK_WORDS.has(tail)) break;
     s = t[1];
@@ -216,7 +225,7 @@ function parseClause(clause, prevAction, locByLower) {
   }
   if (!name) return null;
   if ((action === 'add' || action === 'remove') && qty === null) qty = 1;
-  return { action, qty, unit, name, location };
+  return { action, qty, unit, name, location, ...(store ? { store } : {}) };
 }
 
 // ---------- Matching names to items ----------
