@@ -21,7 +21,10 @@ No build step. Plain HTML/CSS/JS modules, installable to the home screen and usa
 ```bash
 npm start        # serves on http://localhost:5190
 npm test         # voice-command parser tests
+npm run release  # bump the file versions — run before pushing any change
 ```
+
+Every release must bump the version (`npm run release`): the page loads `app.js?v=N`, which imports `parser.js?v=N`, so a phone never mixes a new file with a cached old one. If the app still fails to start, `index.html` clears the offline copy and reloads once, then offers a Reload button.
 
 Camera and microphone need HTTPS, so phones use the live GitHub Pages site. Publishing is automatic: `git push` to `main` and the site updates within a minute or two. On the phone: open the link, then Share → Add to Home Screen.
 

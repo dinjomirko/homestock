@@ -1,5 +1,6 @@
-import { parseCommand, resolveActions, matchItem, matchExact, guessLocation, guessEmoji, parsePack, DEFAULT_LOCATIONS } from './parser.js';
+import { parseCommand, resolveActions, matchItem, matchExact, guessLocation, guessEmoji, parsePack, DEFAULT_LOCATIONS } from './parser.js?v=19';
 
+const APP_VERSION = new URL(import.meta.url).searchParams.get('v') || 'dev';
 const STORAGE_KEY = 'homestock.v1';
 const PREFS_KEY = 'homestock.prefs';
 const KITCHEN = ['Pantry', 'Fridge', 'Freezer'];
@@ -871,7 +872,8 @@ function openMenu() {
       <button data-menu="import">Restore from a backup file</button>
       <button data-menu="sample">Load sample items</button>
       <button data-menu="erase" class="danger">Erase everything</button>
-    </div>`);
+    </div>
+    <p class="note" style="text-align:center">Homestock version ${esc(APP_VERSION)}</p>`);
 }
 
 async function shareText(text, title) {
@@ -1980,3 +1982,6 @@ if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.
 }
 
 render();
+// Tells the startup safety net in index.html that the app is running.
+window.homestockReady = true;
+try { sessionStorage.removeItem('homestock.recovered'); } catch {}

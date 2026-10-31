@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "start": "python3 -m http.server 5190",
-    "test": "node --test"
+    "test": "node --test",
+    "release": "node scripts/release.mjs"
   }
 }

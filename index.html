@@ -12,7 +12,7 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="apple-touch-icon.png">
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="styles.css?v=19">
 </head>
 <body>
   <header class="top">
@@ -82,6 +82,30 @@
   <div id="toast" class="toast" hidden role="status"></div>
   <input id="importFile" type="file" accept="application/json,.json" hidden>
 
-  <script type="module" src="app.js"></script>
+  <script>
+    // Safety net: if the app ever fails to start (say a phone mixed old and new files after an
+    // update), clear the offline copy and reload once; if that doesn't help, offer a button.
+    // Saved items live elsewhere and are never touched.
+    (function () {
+      function freshReload() {
+        var jobs = [];
+        if (navigator.serviceWorker) jobs.push(navigator.serviceWorker.getRegistrations().then(function (rs) { return Promise.all(rs.map(function (r) { return r.unregister(); })); }));
+        if (window.caches) jobs.push(caches.keys().then(function (ks) { return Promise.all(ks.map(function (k) { return caches.delete(k); })); }));
+        Promise.all(jobs).catch(function () {}).then(function () { location.reload(); });
+      }
+      setTimeout(function () {
+        if (window.homestockReady) return;
+        var tried = false;
+        try { tried = sessionStorage.getItem('homestock.recovered') === '1'; sessionStorage.setItem('homestock.recovered', '1'); } catch (e) {}
+        if (!tried) return freshReload();
+        var box = document.createElement('div');
+        box.className = 'boot-fail';
+        box.innerHTML = '<p>Homestock didn’t start properly. Your items are safe.</p><button type="button">Reload</button>';
+        box.querySelector('button').onclick = freshReload;
+        document.body.appendChild(box);
+      }, 5000);
+    })();
+  </script>
+  <script type="module" src="app.js?v=19"></script>
 </body>
 </html>

@@ -1,10 +1,15 @@
 // Network first so updates show up right away; falls back to the cache when offline.
 // Product lookups are never cached.
-const CACHE = 'homestock-v18';
-const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'parser.js', 'scan-worker.js', 'manifest.webmanifest', 'icon.svg', 'apple-touch-icon.png'];
+const VERSION = 19;
+const CACHE = `homestock-v${VERSION}`;
+const SHELL = [
+  './', 'index.html', `styles.css?v=${VERSION}`, `app.js?v=${VERSION}`, `parser.js?v=${VERSION}`, 'scan-worker.js',
+  'manifest.webmanifest', 'icon.svg', 'apple-touch-icon.png',
+];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)));
+  // cache: 'reload' skips the browser's own cache so the offline copy is this version's files.
+  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL.map((u) => new Request(u, { cache: 'reload' })))));
   self.skipWaiting();
 });
 
@@ -16,12 +21,16 @@ self.addEventListener('activate', (e) => {
 self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
   if (e.request.method !== 'GET') return;
-  if (url.origin !== location.origin && url.hostname !== 'unpkg.com') return;
+  const sameOrigin = url.origin === location.origin;
+  if (!sameOrigin && url.hostname !== 'unpkg.com') return;
+  // Our own files are always checked with the server (a quick "not modified" when nothing
+  // changed), so a page never runs a mix of old and new files after an update.
+  const request = sameOrigin ? fetch(url.href, { cache: 'no-cache', credentials: 'same-origin' }) : fetch(e.request);
   e.respondWith(
-    fetch(e.request)
+    request
       .then((res) => {
         const copy = res.clone();
-        caches.open(CACHE).then((c) => c.put(e.request, copy));
+        if (res.ok) caches.open(CACHE).then((c) => c.put(e.request, copy));
         return res;
       })
       .catch(() => caches.match(e.request, { ignoreSearch: true })),
