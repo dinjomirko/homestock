@@ -525,3 +525,11 @@ body { font-variant-numeric: lining-nums; }
 }
 .cook-bar span { flex: 1; font-weight: 600; }
 .cook-bar .btn { min-height: 44px; }
+
+/* Spot headings inside a place on the Stock tab */
+.sub-head {
+  list-style: none; padding: 9px 14px 5px; border-top: 1px solid var(--line); background: var(--bg);
+  font: 500 11px var(--caps); letter-spacing: .16em; text-transform: uppercase; color: var(--muted);
+}
+.sub-head:first-child { border-top: 0; }
+.sub-head + .swipe-row { border-top: 0; }

@@ -262,3 +262,20 @@ test('pasted lists, including receipt text', () => {
     ['milk', 1, ''], ['tomatoes', 2, 'can'], ['bread', 2, ''], ['gv mlk 2 gal', 1, ''], ['paper towels', 1, ''],
   ]);
 });
+
+test('spots within a place', () => {
+  const p = (t, opts = {}) => {
+    const [a] = parseCommand(t, opts);
+    return [a.action, a.qty, a.name, a.location, a.shelf];
+  };
+  assert.deepEqual(p('put 3 boxes of screws on shelf 2 in the garage'), ['add', 3, 'screws', 'Garage', 'Shelf 2']);
+  assert.deepEqual(p('put the screws on shelf two'), ['add', 1, 'screws', null, 'Shelf 2']);
+  assert.deepEqual(p('bought rice for the top shelf of the pantry'), ['add', 1, 'rice', 'Pantry', 'Top shelf']);
+  assert.deepEqual(p('move the batteries to bin b'), ['restock', null, 'batteries', null, 'Bin B']);
+  assert.deepEqual(p('put tape on the workbench', { spots: ['Workbench'] }), ['add', 1, 'tape', null, 'Workbench']);
+  // Unchanged: "of" inside a product, numbers at the end, plain "shelf".
+  assert.equal(one('bought 2 cans of chicken stock').name, 'chicken stock');
+  assert.equal(one('used a carton of stock').name, 'stock');
+  assert.deepEqual([one('set paper towels to 4').qty, one('set paper towels to 4').name], [4, 'paper towels']);
+  assert.equal(one('took a jar of salsa off the shelf').name, 'salsa');
+});

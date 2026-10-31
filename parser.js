@@ -74,7 +74,19 @@ const STOCK_WORDS = new Set([
   'storage', 'stash', 'house', 'home',
 ]);
 
-const TAIL = /^(.*\S)\s+(from|to|into|in|on|onto|at|for|off of|off|out of|back to|back in|back into)\s+(?:the |my |our |a )?([a-z' ]+)$/;
+const TAIL = /^(.*\S)\s+(from|to|into|in|on|onto|at|for|of|off of|off|out of|back to|back in|back into)\s+(?:the |my |our |a )?([a-z0-9' ]+)$/;
+
+// A spot within a place: "shelf 2", "top shelf", "bin b", "drawer three", or one you've named.
+const SPOT = /^(?:(?:top|bottom|middle|upper|lower|left|right|back|front|first|second|third)\s+(?:shelf|drawer|bin|rack|cabinet|cupboard|basket)|(?:shelf|drawer|bin|rack|tote|cabinet|cupboard|basket|row|section)\s+(?:\d+|[a-z]))$/;
+const SPOT_NUMBERS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+
+function matchSpot(tail, known = []) {
+  const t = tail.replace(/\b(one|two|three|four|five|six|seven|eight|nine|ten)\b/g, (w) => SPOT_NUMBERS[w]);
+  const mine = known.find((k) => k.toLowerCase() === t);
+  if (mine) return mine;
+  if (!SPOT.test(t)) return null;
+  return t.charAt(0).toUpperCase() + t.slice(1).replace(/ ([a-z])$/, (m) => m.toUpperCase());
+}
 
 const numOf = (t) => {
   if (/^\d+(\.\d+)?$/.test(t)) return parseFloat(t);
@@ -103,7 +115,7 @@ function startsNewClause(words) {
 export function parseCommand(text, opts = {}) {
   const locations = opts.locations || DEFAULT_LOCATIONS;
   const locByLower = new Map(locations.map((l) => [l.toLowerCase(), l]));
-  const ctx = { locByLower, stores: opts.stores || [], listContext: Boolean(opts.listContext) };
+  const ctx = { locByLower, stores: opts.stores || [], spots: opts.spots || [], listContext: Boolean(opts.listContext) };
   const clean = String(text)
     .toLowerCase()
     .replace(/[’‘]/g, "'")
@@ -214,7 +226,7 @@ export function findStore(heard, stores = []) {
 const LIST_VERBS = new Set(['add', 'get', 'buy', 'put', 'pick up']);
 
 function parseClause(clause, prevAction, ctx = {}) {
-  const { locByLower = new Map(), stores = [], listContext = false } = ctx;
+  const { locByLower = new Map(), stores = [], spots = [], listContext = false } = ctx;
   let s = stripFiller(clause.split(' ')).join(' ');
   let action = null;
   const m = matchPhrase(s);
@@ -230,11 +242,15 @@ function parseClause(clause, prevAction, ctx = {}) {
   let to = null;
   let from = null;
   let store = null;
+  let shelf = null;
   for (let k = 0; k < 3; k++) {
     const t = s.match(TAIL);
     if (!t) break;
-    const prep = t[2];
+    let prep = t[2];
     const tail = t[3].trim();
+    // "out of" / "off of" are one word here, not "out" + "of".
+    const split = prep === 'of' && t[1].match(/^(.*\S)\s+(out|off)$/);
+    if (split) [t[1], prep] = [split[1], `${split[2]} of`];
     const list = tail.match(/^(?:(.+?) )?(?:(?:shopping |grocery )?list|shopping|grocery)$/);
     if (list) {
       action =
@@ -246,10 +262,12 @@ function parseClause(clause, prevAction, ctx = {}) {
       if (['from', 'out of', 'off', 'off of'].includes(prep)) from ||= locByLower.get(tail);
       else to ||= locByLower.get(tail);
     }
-    else if (findStore(tail, stores)) store = findStore(tail, stores);
+    else if (prep !== 'of' && findStore(tail, stores)) store = findStore(tail, stores);
+    else if (matchSpot(tail, spots)) shelf ||= matchSpot(tail, spots);
     // "…to the list for tomorrow": not a store, but the list part before it still counts.
-    else if (t[2] === 'for' && /\b(?:list|shopping|grocery)$/.test(t[1])) { /* drop it */ }
-    else if (!STOCK_WORDS.has(tail)) break;
+    else if (prep === 'for' && /\b(?:list|shopping|grocery)$/.test(t[1])) { /* drop it */ }
+    // "of" only ends a place ("top shelf of the pantry"), never "a can of stock".
+    else if (prep === 'of' || !STOCK_WORDS.has(tail)) break;
     s = t[1];
   }
   if (!action) action = prevAction;
@@ -294,7 +312,7 @@ function parseClause(clause, prevAction, ctx = {}) {
   }
   if (!name) return null;
   if ((action === 'add' || action === 'remove') && qty === null) qty = 1;
-  return { action, qty, unit, name, location, ...(store ? { store } : {}) };
+  return { action, qty, unit, name, location, ...(store ? { store } : {}), ...(shelf ? { shelf } : {}) };
 }
 
 // ---------- Dates, use-by and how much is left ----------

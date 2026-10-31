@@ -1,11 +1,11 @@
 import {
   parseCommand, resolveActions, matchItem, matchExact, guessLocation, guessEmoji, parsePack, parseListLines,
   suggestShelfLife, openLife, isoDate, DEFAULT_LOCATIONS,
-} from './parser.js?v=26';
+} from './parser.js?v=27';
 import {
   initSync, pushSoon, syncInfo, createHousehold, joinHousehold, leaveHousehold, authenticate, useHousehold, signOut,
   removeMember, newJoinCode, renameMe,
-} from './sync.js?v=26';
+} from './sync.js?v=27';
 
 const APP_VERSION = new URL(import.meta.url).searchParams.get('v') || 'dev';
 const STORAGE_KEY = 'homestock.v1';
@@ -32,7 +32,7 @@ const buzz = (ms = 30) => navigator.vibrate?.(ms);
 // ---------- State ----------
 
 let state = load(STORAGE_KEY, { items: [] });
-const prefs = { scanMode: 'add', sound: true, stores: ['Costco', 'Aldi', 'Target', 'Walmart'], places: [...DEFAULT_LOCATIONS], ...load(PREFS_KEY, {}) };
+const prefs = { scanMode: 'add', sound: true, stores: ['Costco', 'Aldi', 'Target', 'Walmart'], places: [...DEFAULT_LOCATIONS], subPlaces: {}, ...load(PREFS_KEY, {}) };
 delete prefs.shopStore; // the store filter used to be remembered between launches; now it isn't
 // shopStore: the store picked at the top of the shopping list, for this visit only.
 const ui = { view: 'stock', loc: 'All', q: '', bought: new Map(), flash: null, editor: null, paste: null, account: null, shopStore: 'all' };
@@ -180,6 +180,16 @@ function allLocations() {
   return [...new Set([...prefs.places, ...state.items.flatMap(placesOf)])];
 }
 
+// Spots within a place (shelves, drawers, bins). An item's `shelf` is its spot in its main place.
+const spotsIn = (place) => prefs.subPlaces[place] || [];
+const allSpots = () => [...new Set(Object.values(prefs.subPlaces).flat())];
+function addSpot(place, spot) {
+  if (!spot || spotsIn(place).includes(spot)) return;
+  prefs.subPlaces[place] = [...spotsIn(place), spot];
+  savePrefs();
+}
+const shelfAt = (it, place) => (place === it.location ? it.shelf || '' : '');
+
 function pluralUnit(unit, n) {
   if (!unit || n <= 1) return unit || ''; // "1 bottle", "½ bottle"
 
@@ -278,7 +288,7 @@ function itemRow(it, showLoc, place = null) {
     ? place
       ? `${fmt(it.qty)} total · ${placesOf(it).filter((pl) => pl !== place && countAt(it, pl) > 0).map((pl) => `${esc(pl)} ${fmt(countAt(it, pl))}`).join(', ')}`
       : placesOf(it).map((pl) => `${esc(pl)} ${fmt(countAt(it, pl))}`).join(' · ')
-    : showLoc ? esc(it.location) : '';
+    : showLoc ? esc(it.location) + (it.shelf ? ` · ${esc(it.shelf)}` : '') : '';
   const meta = [esc(it.brand), where, openedText(it), useByHtml(it), listed ? '<span class="warn">On list</span>' : '']
     .filter(Boolean).join(' · ');
   return `<li class="swipe-row swipeable" data-id="${it.id}" data-swipe-right="${listed ? 'unlist' : 'tolist'}" data-swipe-left="delete">
@@ -296,6 +306,27 @@ function itemRow(it, showLoc, place = null) {
   </li>`;
 }
 
+// One place's items, under small spot headings when any of them has a spot.
+function placeList(group, place) {
+  const order = (it) => {
+    const sp = shelfAt(it, place);
+    if (!sp) return 9999;
+    const i = spotsIn(place).indexOf(sp);
+    return i >= 0 ? i : 999;
+  };
+  const sorted = [...group].sort((a, b) => order(a) - order(b) || shelfAt(a, place).localeCompare(shelfAt(b, place)) || a.name.localeCompare(b.name));
+  const anySpot = sorted.some((i) => shelfAt(i, place));
+  let last = null;
+  let html = '';
+  for (const it of sorted) {
+    const sp = shelfAt(it, place);
+    if (anySpot && sp !== last) html += `<li class="sub-head">${esc(sp || 'No spot set')}</li>`;
+    last = sp;
+    html += itemRow(it, false, place);
+  }
+  return html;
+}
+
 function renderStock() {
   renderChips();
   if (!state.items.length) {
@@ -311,7 +342,7 @@ function renderStock() {
     </div>`;
   }
   const q = ui.q.trim().toLowerCase();
-  const matches = (i) => `${i.name} ${i.brand} ${placesOf(i).join(' ')}`.toLowerCase().includes(q);
+  const matches = (i) => `${i.name} ${i.brand} ${placesOf(i).join(' ')} ${i.shelf || ''}`.toLowerCase().includes(q);
   let items = state.items.filter(inStock).filter((i) => ui.loc === 'All' || (ui.loc === 'soon' ? useSoon(i) : shownIn(i).includes(ui.loc)));
   if (q) items = items.filter(matches);
   items.sort(ui.loc === 'soon' ? (a, b) => daysLeft(a) - daysLeft(b) : (a, b) => a.name.localeCompare(b.name));
@@ -337,12 +368,12 @@ function renderStock() {
     html = allLocations()
       .map((loc) => {
         const group = items.filter((i) => shownIn(i).includes(loc));
-        return group.length ? `<h2 class="group">${esc(loc)}</h2><ul class="list">${group.map((i) => itemRow(i, false, loc)).join('')}</ul>` : '';
+        return group.length ? `<h2 class="group">${esc(loc)}</h2><ul class="list">${placeList(group, loc)}</ul>` : '';
       })
       .join('');
   } else {
-    const place = ui.loc !== 'All' && ui.loc !== 'soon' ? ui.loc : null;
-    html = `<ul class="list" style="margin-top:12px">${items.map((i) => itemRow(i, !place, place)).join('')}</ul>`;
+    const place = ui.loc !== 'All' && ui.loc !== 'soon' && !q ? ui.loc : null;
+    html = `<ul class="list" style="margin-top:12px">${place ? placeList(items, place) : items.map((i) => itemRow(i, true)).join('')}</ul>`;
   }
   const tip = prefs.stockSwipeTipSeen ? '' : '<p class="note" style="margin:10px 4px 0">Swipe an item right to add it to the shopping list, or left to delete it.</p>';
   return tip + html + listNote + `<div class="add-pair"><button class="add-row" data-act="add">+ Add an item</button><button class="add-row" data-act="paste">Paste a list</button></div>`;
@@ -366,7 +397,7 @@ function renderChips() {
 
 function shopRow(it, bought) {
   const status = it.listOnly ? 'Not in stock' : it.qty <= 0 ? 'Out' : `${esc(qtyText(it))} left`;
-  const meta = bought ? `Back in stock · ${esc(qtyText(it))}` : `${status} · ${esc(it.location)}`;
+  const meta = bought ? `Back in stock · ${esc(qtyText(it))}` : `${status} · ${esc(it.location)}${it.shelf ? ` · ${esc(it.shelf)}` : ''}`;
   return `<li class="swipe-row ${bought ? '' : 'swipeable'}" data-id="${it.id}" data-swipe-left="unlist">
     ${bought ? '' : '<span class="swipe-label act-left" aria-hidden="true">Remove</span>'}
     <div class="item ${bought ? 'bought' : ''} ${ui.flash === it.id ? 'flash' : ''}">
@@ -753,7 +784,7 @@ function applyActions(actions) {
       continue;
     }
     const create = (qty) => {
-      it = newItem({ name: sentenceCase(a.name), qty, unit: a.unit || '', location: a.location || guessLocation(a.name), listOnly: qty <= 0 && (a.action === 'need' || a.action === 'out') });
+      it = newItem({ name: sentenceCase(a.name), qty, unit: a.unit || '', location: a.location || guessLocation(a.name), shelf: a.shelf || '', listOnly: qty <= 0 && (a.action === 'need' || a.action === 'out') });
       state.items.push(it);
     };
     switch (a.action) {
@@ -843,11 +874,15 @@ function applyActions(actions) {
           it.need = false;
           freshUseBy(it, qtyBefore);
           done.push(`✓ ${it.name} bought · ${qtyText(it)}${it.spots ? ' in all' : ` in the ${it.location.toLowerCase()}`}`);
-        } else if (a.location && a.location !== it.location) {
+        } else if ((a.location && a.location !== it.location) || (a.shelf && a.shelf !== it.shelf)) {
           // Moving it all: other places merge into the new one.
-          it.location = a.location;
-          delete it.spots;
-          done.push(`${it.name} moved to the ${it.location.toLowerCase()}`);
+          if (a.location && a.location !== it.location) {
+            it.location = a.location;
+            it.shelf = '';
+            delete it.spots;
+          }
+          if (a.shelf) it.shelf = a.shelf;
+          done.push(`${it.name} moved to the ${it.location.toLowerCase()}${it.shelf ? `, ${it.shelf.toLowerCase()}` : ''}`);
         } else {
           problems.push(`${it.name} isn't on the shopping list${a.location ? ` and is already in the ${a.location.toLowerCase()}` : ''}`);
           continue;
@@ -862,6 +897,11 @@ function applyActions(actions) {
         continue;
     }
     if (a.unit && !it.unit) it.unit = a.unit;
+    // "…on shelf 2": that's its spot in its main place.
+    if (a.shelf && ['add', 'set', 'restock'].includes(a.action) && (!a.location || a.location === it.location)) {
+      it.shelf = a.shelf;
+      addSpot(it.location, a.shelf);
+    }
     if (a.store) {
       it.store = a.store;
       if (!prefs.stores.includes(a.store)) {
@@ -909,7 +949,7 @@ function answerFor(a) {
   const have = placesOf(it).filter((pl) => countAt(it, pl) > 0);
   const where = have.length > 1
     ? `: ${have.map((pl) => `${fmt(countAt(it, pl))} in the ${pl.toLowerCase()}`).join(' and ')}`
-    : ` in the ${(have[0] || it.location).toLowerCase()}`;
+    : ` in the ${(have[0] || it.location).toLowerCase()}${it.shelf && (have[0] || it.location) === it.location ? `, ${it.shelf.toLowerCase()}` : ''}`;
   const list = isLow(it) ? ' It’s on the shopping list.' : '';
   if (it.qty <= 0) return `You're out of ${it.name.toLowerCase()}.${list}`;
   const amount = it.unit ? `${fmt(it.qty)} ${pluralUnit(it.unit, it.qty)} of ${it.name.toLowerCase()}` : `${fmt(it.qty)} ${it.name.toLowerCase()}`;
@@ -921,7 +961,7 @@ function runCommand(texts) {
   const locations = allLocations();
   let best = null;
   for (const t of texts) {
-    const r = resolveActions(parseCommand(t, { locations, stores: allStores(), listContext: ui.view === 'shop' && !ui.editor }), state.items);
+    const r = resolveActions(parseCommand(t, { locations, stores: allStores(), spots: allSpots(), listContext: ui.view === 'shop' && !ui.editor }), state.items);
     const score = r.filter((a) => a.action && (a.item || a.action !== 'remove')).length * 2 + r.filter((a) => a.item).length;
     if (r.length && (!best || score > best.score)) best = { r, score };
   }
@@ -977,6 +1017,9 @@ const locationPicker = (current) =>
 const storePicker = (current) =>
   selectPicker('store', ['', ...allStores()], current, { label: 'Buy at', text: (v) => v || 'Any store', other: { label: '+ New store…', ask: 'Store name (e.g. Costco, Aldi)' } });
 
+const shelfPicker = (place, current) =>
+  selectPicker('shelf', ['', ...spotsIn(place)], current, { label: 'Spot', text: (v) => v || 'Anywhere', other: { label: '+ New spot…', ask: `Name a spot in the ${place.toLowerCase()} (e.g. Shelf 2, Top drawer, Bin A)` } });
+
 const unitPicker = (current) =>
   selectPicker('unit', UNIT_CHOICES, current, { label: 'Counted in', text: (v) => v || 'each', other: { label: 'Other…', ask: 'Counted in what? (e.g. tube, carton, pound)' } });
 
@@ -993,6 +1036,8 @@ document.addEventListener('change', (e) => {
     value = field === 'unit' ? singularUnit(value) : field === 'store' ? titleCase(value) : sentenceCase(value);
     if (![...sel.options].some((o) => o.value === value)) sel.querySelector('[value="__new"]').insertAdjacentHTML('beforebegin', `<option value="${esc(value)}">${esc(value)}</option>`);
     sel.value = value;
+    // A new spot belongs to its place straight away, so it survives switching places.
+    if (field === 'shelf' && sel.form?.location) addSpot(sel.form.location.value, value);
   }
   sel.dataset.prev = sel.value;
 });
@@ -1118,6 +1163,9 @@ function renderEditor() {
     </div>
     <div class="row2">
       <label>Kept in ${locationPicker(item.location)}</label>
+      <label>Spot <span id="shelfPick">${shelfPicker(item.location, item.shelf || '')}</span></label>
+    </div>
+    <div class="row2">
       <label>Buy at ${storePicker(item.store || '')}</label>
     </div>
     <div id="spots">${spotsHtml(item.location)}</div>
@@ -1214,6 +1262,7 @@ $('#main').addEventListener('change', (e) => {
   if (e.target.name === 'location' && e.target.value !== '__new') {
     syncSpots(form);
     const pl = e.target.value;
+    $('#shelfPick', form).innerHTML = shelfPicker(pl, pl === ui.editor.item.location ? ui.editor.item.shelf || '' : '');
     if (pl in ui.editor.spots) {
       form.qty.value = round((parseFloat(form.qty.value) || 0) + ui.editor.spots[pl]);
       delete ui.editor.spots[pl];
@@ -1251,6 +1300,7 @@ $('#main').addEventListener('submit', (e) => {
     qty: round(main + Object.values(spots).reduce((a, b) => a + b, 0)),
     unit: singularUnit(form.unit.value),
     location: form.location.value,
+    shelf: form.shelf.value,
     store: form.store.value,
     low: form.low.value === '' ? null : Number(form.low.value),
     scanQty: Math.max(1, parseInt(form.scanQty.value, 10) || 1),
@@ -1271,6 +1321,7 @@ $('#main').addEventListener('submit', (e) => {
   if (!form.opened.value) delete item.opened;
   else if (form.opened.value !== openedBefore) markOpened(item, form.opened.value);
   for (const pl of placesOf(item)) if (!prefs.places.includes(pl)) prefs.places.push(pl);
+  if (item.shelf && !spotsIn(item.location).includes(item.shelf)) prefs.subPlaces[item.location] = [...spotsIn(item.location), item.shelf];
   savePrefs();
   // Restocking clears a list request; just editing other details doesn't.
   if (item.qty > qtyBefore && item.qty > (item.low ?? -1)) item.need = false;
@@ -1342,10 +1393,10 @@ function openPlaces() {
   const count = (pl) => state.items.filter((i) => placesOf(i).includes(pl)).length;
   openSheet(`
     <div class="sheet-head"><h2>Places</h2><button class="link" data-close>Done</button></div>
-    <p class="note">Where things are kept. Add spots like “Garage shelf 2”, tap a name to rename it, and use the arrows to change the order.</p>
+    <p class="note">Where things are kept. Tap a place to add spots inside it, like shelves, drawers or bins. Use the arrows to change the order.</p>
     <ul class="list" style="margin-top:12px">${places
       .map((pl, i) => `<li class="item place-row">
-        <button class="info" data-place-rename="${esc(pl)}"><div class="name">${esc(pl)}</div><div class="meta">${count(pl)} item${count(pl) === 1 ? '' : 's'}</div></button>
+        <button class="info" data-place-open="${esc(pl)}"><div class="name">${esc(pl)}</div><div class="meta">${count(pl)} item${count(pl) === 1 ? '' : 's'}${spotsIn(pl).length ? ` · ${spotsIn(pl).length} spot${spotsIn(pl).length === 1 ? '' : 's'}` : ''} ›</div></button>
         <button class="icon-btn" data-place-move="-1" data-place="${esc(pl)}" ${i === 0 ? 'disabled' : ''} aria-label="Move ${esc(pl)} up">↑</button>
         <button class="icon-btn" data-place-move="1" data-place="${esc(pl)}" ${i === places.length - 1 ? 'disabled' : ''} aria-label="Move ${esc(pl)} down">↓</button>
         <button class="remove" data-place-del="${esc(pl)}" aria-label="Remove ${esc(pl)}"><svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17"/></svg></button>
@@ -1354,8 +1405,66 @@ function openPlaces() {
     <button class="add-row" data-place-add>+ Add a place</button>`);
 }
 
-// Renaming into an existing place merges the two.
+function openSpots(place) {
+  const spots = spotsIn(place);
+  const count = (sp) => state.items.filter((i) => i.location === place && i.shelf === sp).length;
+  openSheet(`
+    <div class="sheet-head"><button class="link" data-place-back>‹ Places</button><h2>${esc(place)}</h2><button class="link" data-close>Done</button></div>
+    <p class="note">Spots inside the ${esc(place.toLowerCase())}, like shelves, drawers or bins. Items show under their spot on the Stock tab. Tap a spot to rename it.</p>
+    ${spots.length ? `<ul class="list" style="margin-top:12px">${spots
+      .map((sp, i) => `<li class="item place-row">
+        <button class="info" data-sub-rename="${esc(sp)}" data-sub-place="${esc(place)}"><div class="name">${esc(sp)}</div><div class="meta">${count(sp)} item${count(sp) === 1 ? '' : 's'}</div></button>
+        <button class="icon-btn" data-sub-move="-1" data-sub="${esc(sp)}" data-sub-place="${esc(place)}" ${i === 0 ? 'disabled' : ''} aria-label="Move ${esc(sp)} up">↑</button>
+        <button class="icon-btn" data-sub-move="1" data-sub="${esc(sp)}" data-sub-place="${esc(place)}" ${i === spots.length - 1 ? 'disabled' : ''} aria-label="Move ${esc(sp)} down">↓</button>
+        <button class="remove" data-sub-del="${esc(sp)}" data-sub-place="${esc(place)}" aria-label="Remove ${esc(sp)}"><svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17"/></svg></button>
+      </li>`)
+      .join('')}</ul>` : ''}
+    <button class="add-row" data-sub-add="${esc(place)}">+ Add a spot</button>
+    <button class="link" data-place-rename="${esc(place)}" style="width:100%">Rename ${esc(place.toLowerCase())}</button>`);
+}
+
+function spotAction(e) {
+  const t = (k) => e.target.closest(`[${k}]`);
+  const place = t('data-sub-place')?.dataset.subPlace || t('data-sub-add')?.dataset.subAdd;
+  if (t('data-sub-add')) {
+    const name = sentenceCase(prompt(`Name a spot in the ${place.toLowerCase()} (e.g. Shelf 2, Top drawer, Bin A)`)?.trim() || '');
+    if (name) addSpot(place, name);
+  }
+  const rename = t('data-sub-rename')?.dataset.subRename;
+  if (rename) {
+    const to = sentenceCase(prompt(`Rename “${rename}” to:`, rename)?.trim() || '');
+    if (!to || to === rename) return;
+    checkpoint();
+    for (const it of state.items) if (it.location === place && it.shelf === rename) it.shelf = to;
+    prefs.subPlaces[place] = [...new Set(spotsIn(place).map((sp) => (sp === rename ? to : sp)))];
+  }
+  const move = t('data-sub-move');
+  if (move) {
+    const list = [...spotsIn(place)];
+    const i = list.indexOf(move.dataset.sub);
+    const j = i + Number(move.dataset.subMove);
+    [list[i], list[j]] = [list[j], list[i]];
+    prefs.subPlaces[place] = list;
+  }
+  const del = t('data-sub-del')?.dataset.subDel;
+  if (del) {
+    const n = state.items.filter((i) => i.location === place && i.shelf === del).length;
+    if (n && !confirm(`Remove ${del}? Its ${n} item${n === 1 ? '' : 's'} stay in the ${place.toLowerCase()}, just without a spot.`)) return;
+    checkpoint();
+    for (const it of state.items) if (it.location === place && it.shelf === del) it.shelf = '';
+    prefs.subPlaces[place] = spotsIn(place).filter((sp) => sp !== del);
+  }
+  savePrefs();
+  save();
+  openSpots(place);
+}
+
+// Renaming into an existing place merges the two (and their spots).
 function renamePlace(from, to) {
+  if (prefs.subPlaces[from]) {
+    prefs.subPlaces[to] = [...new Set([...spotsIn(to), ...prefs.subPlaces[from]])];
+    delete prefs.subPlaces[from];
+  }
   for (const it of state.items) {
     if (it.location === from) it.location = to;
     if (it.spots && from in it.spots) {
@@ -1383,6 +1492,9 @@ function placeAction(e) {
     if (allLocations().includes(to) && !confirm(`${to} already exists. Put everything from ${rename} there?`)) return;
     checkpoint();
     renamePlace(rename, to);
+    savePrefs();
+    save();
+    return e.target.closest('[data-place-rename]').closest('#sheet').querySelector('[data-place-back]') ? openSpots(to) : openPlaces();
   }
   const move = t('data-place-move');
   if (move) {
@@ -1399,6 +1511,9 @@ function placeAction(e) {
     const n = state.items.filter((i) => placesOf(i).includes(del)).length;
     if (n && !confirm(`Move the ${n} item${n === 1 ? '' : 's'} in ${del} to ${others[0]}?`)) return;
     checkpoint();
+    // Its spots don't exist in the other place, so moved items lose them.
+    for (const it of state.items) if (it.location === del) it.shelf = '';
+    delete prefs.subPlaces[del];
     renamePlace(del, others[0]);
     prefs.places = prefs.places.filter((pl) => pl !== del);
   }
@@ -1788,11 +1903,13 @@ function loadSample() {
     s('Toilet paper', 9, 'roll', 'Bathroom', { brand: 'Charmin', scanQty: 12, low: 4, store: 'Costco' }),
     s('Toothpaste', 1, 'tube', 'Bathroom', { low: 1 }),
     s('Shampoo', 1, 'bottle', 'Bathroom', { low: 0 }),
-    s('Duct tape', 2, 'roll', 'Garage'),
-    s('AA batteries', 8, '', 'Garage', { low: 4, store: 'Costco' }),
-    s('Wood screws 1-5/8"', 1, 'box', 'Garage'),
+    s('Duct tape', 2, 'roll', 'Garage', { shelf: 'Shelf 1' }),
+    s('AA batteries', 8, '', 'Garage', { low: 4, store: 'Costco', shelf: 'Shelf 2' }),
+    s('Wood screws 1-5/8"', 1, 'box', 'Garage', { shelf: 'Shelf 2' }),
     s('Furnace filter 16x25x1', 0, '', 'Garage'),
   );
+  addSpot('Garage', 'Shelf 1');
+  addSpot('Garage', 'Shelf 2');
   save();
   toast('Sample items added', { undo: true });
 }
@@ -1818,7 +1935,7 @@ function openVoice() {
         <button type="button">Removing a roll of paper towels</button><button type="button">Used 2 cans of tomatoes and a box of spaghetti</button>
         <button type="button">Bought a dozen eggs</button><button type="button">We're out of milk</button>
         <button type="button">How many rolls of toilet paper do we have?</button><button type="button">We have 3 rolls of duct tape</button>
-        <button type="button">Add coffee to the shopping list</button><button type="button">Take coffee off the list</button><button type="button">Add eggs to the Costco list</button><button type="button">Move tomatoes from the list to the pantry</button><button type="button">Milk expires Friday</button><button type="button">Opened the salsa</button><button type="button">Half a bottle of olive oil left</button><button type="button">Put 6 rolls of paper towels in the garage</button>
+        <button type="button">Add coffee to the shopping list</button><button type="button">Take coffee off the list</button><button type="button">Add eggs to the Costco list</button><button type="button">Move tomatoes from the list to the pantry</button><button type="button">Milk expires Friday</button><button type="button">Opened the salsa</button><button type="button">Half a bottle of olive oil left</button><button type="button">Put 6 rolls of paper towels in the garage</button><button type="button">Put 3 boxes of screws on shelf 2 in the garage</button>
       </div>
     </div>`, () => {
     stopListening();
@@ -2709,6 +2826,10 @@ $('#sheet').addEventListener('click', (e) => {
     else navigator.clipboard?.writeText(text).then(() => toast('Copied — paste it into any note'), () => prompt('Copy this:', text));
     return;
   }
+  const openPlace = e.target.closest('[data-place-open]')?.dataset.placeOpen;
+  if (openPlace) return openSpots(openPlace);
+  if (e.target.closest('[data-place-back]')) return openPlaces();
+  if (e.target.closest('[data-sub-add], [data-sub-rename], [data-sub-move], [data-sub-del]')) return spotAction(e);
   if (e.target.closest('[data-place-add], [data-place-rename], [data-place-move], [data-place-del]')) return placeAction(e);
   if (e.target.closest('[data-store-add]')) {
     const name = titleCase(prompt('Store name (e.g. Costco, Aldi)') || '');
@@ -2828,10 +2949,11 @@ Promise.race([
       state.items = items;
       persistOnly();
     },
-    settings: () => ({ stores: prefs.stores, places: prefs.places }),
+    settings: () => ({ stores: prefs.stores, places: prefs.places, subPlaces: prefs.subPlaces }),
     applySettings: (data) => {
       if (Array.isArray(data.stores)) prefs.stores = data.stores;
       if (Array.isArray(data.places)) prefs.places = data.places;
+      if (data.subPlaces && typeof data.subPlaces === 'object') prefs.subPlaces = data.subPlaces;
       try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch {}
     },
     persist: persistOnly,
