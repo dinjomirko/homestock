@@ -1,4 +1,4 @@
-import { parseCommand, resolveActions, matchItem, matchExact, guessLocation, guessEmoji, parsePack, DEFAULT_LOCATIONS } from './parser.js?v=19';
+import { parseCommand, resolveActions, matchItem, matchExact, guessLocation, guessEmoji, parsePack, DEFAULT_LOCATIONS } from './parser.js?v=20';
 
 const APP_VERSION = new URL(import.meta.url).searchParams.get('v') || 'dev';
 const STORAGE_KEY = 'homestock.v1';
@@ -632,44 +632,38 @@ function toast(msg, { undo: withUndo = false } = {}) {
 
 const UNIT_CHOICES = ['', 'can', 'box', 'bottle', 'bag', 'jar', 'roll', 'pack'];
 
-// A row of tap-to-pick chips backed by a hidden input, so common answers need no typing.
-function chipPicker(field, options, current, { label, other, scroll = false, text = (v) => v } = {}) {
+// A compact dropdown with a "new…" choice at the end, which asks for a name.
+function selectPicker(field, options, current, { label, other, text = (v) => v } = {}) {
   const opts = options.includes(current) ? options : [...options, current];
-  return `<input type="hidden" name="${field}" value="${esc(current)}">
-    <div class="pick ${scroll ? 'scroll' : ''}" role="radiogroup" aria-label="${esc(label)}">${opts
-      .map((v) => `<button type="button" role="radio" data-pick="${field}" data-value="${esc(v)}" class="${v === current ? 'on' : ''}" aria-checked="${v === current}">${esc(text(v))}</button>`)
-      .join('')}${other ? `<button type="button" data-pick="${field}" data-value="__new" data-ask="${esc(other.ask)}">${esc(other.label)}</button>` : ''}</div>`;
+  return `<select name="${field}" aria-label="${esc(label)}" data-prev="${esc(current)}" data-ask="${esc(other.ask)}">${opts
+    .map((v) => `<option value="${esc(v)}" ${v === current ? 'selected' : ''}>${esc(text(v))}</option>`)
+    .join('')}<option value="__new">${esc(other.label)}</option></select>`;
 }
 
-const locationPicker = (current, scroll) =>
-  chipPicker('location', allLocations(), current, { label: 'Kept in', scroll, other: { label: '+ New place', ask: 'Name the new place (e.g. Basement, Laundry room)' } });
+const locationPicker = (current) =>
+  selectPicker('location', allLocations(), current, { label: 'Kept in', other: { label: '+ New place…', ask: 'Name the new place (e.g. Basement, Laundry room)' } });
 
 const storePicker = (current) =>
-  chipPicker('store', ['', ...allStores()], current, { label: 'Buy at', text: (v) => v || 'Any store', other: { label: '+ New store', ask: 'Store name (e.g. Costco, Aldi)' } });
+  selectPicker('store', ['', ...allStores()], current, { label: 'Buy at', text: (v) => v || 'Any store', other: { label: '+ New store…', ask: 'Store name (e.g. Costco, Aldi)' } });
 
 const unitPicker = (current) =>
-  chipPicker('unit', UNIT_CHOICES, current, { label: 'Counted in', scroll: true, text: (v) => v || 'each', other: { label: 'Other…', ask: 'Counted in what? (e.g. tube, carton, pound)' } });
+  selectPicker('unit', UNIT_CHOICES, current, { label: 'Counted in', text: (v) => v || 'each', other: { label: 'Other…', ask: 'Counted in what? (e.g. tube, carton, pound)' } });
 
-document.addEventListener('click', (e) => {
-  const b = e.target.closest('[data-pick]');
-  if (!b) return;
-  const group = b.closest('.pick');
-  const field = b.dataset.pick;
-  let value = b.dataset.value;
-  if (value === '__new') {
-    value = prompt(b.dataset.ask)?.trim();
-    if (!value) return;
-    value = field === 'unit' ? singularUnit(value) : field === 'store' ? titleCase(value) : sentenceCase(value);
-    if (!group.querySelector(`[data-value="${CSS.escape(value)}"]`)) {
-      b.insertAdjacentHTML('beforebegin', `<button type="button" role="radio" data-pick="${field}" data-value="${esc(value)}">${esc(value)}</button>`);
+document.addEventListener('change', (e) => {
+  const sel = e.target.closest('select[data-ask]');
+  if (!sel) return;
+  if (sel.value === '__new') {
+    let value = prompt(sel.dataset.ask)?.trim();
+    if (!value) {
+      sel.value = sel.dataset.prev;
+      return;
     }
+    const field = sel.name;
+    value = field === 'unit' ? singularUnit(value) : field === 'store' ? titleCase(value) : sentenceCase(value);
+    if (![...sel.options].some((o) => o.value === value)) sel.querySelector('[value="__new"]').insertAdjacentHTML('beforebegin', `<option value="${esc(value)}">${esc(value)}</option>`);
+    sel.value = value;
   }
-  b.closest('form')[field].value = value;
-  group.querySelectorAll('[data-value]').forEach((x) => {
-    const on = x.dataset.value === value;
-    x.classList.toggle('on', on);
-    x.setAttribute('aria-checked', on);
-  });
+  sel.dataset.prev = sel.value;
 });
 
 // The item editor is an ordinary page rather than an overlay: on iPhone, text fields inside
@@ -756,15 +750,16 @@ function renderEditor() {
     ${similar ? `<div class="suggest"><span>Is this your <b>${esc(similar.name)}</b>?</span>
       <button type="button" class="btn small primary" data-edit="link" data-id="${similar.id}">Yes, same thing</button></div>` : ''}
     <label>Name<input name="name" value="${esc(item.name)}" placeholder="What is it?" autocomplete="off" enterkeyhint="done"></label>
-    <span class="label">How many</span>
-    <div class="qty-row">
-      <div class="stepper big"><button type="button" data-step="-1" aria-label="One less">−</button><input name="qty" type="number" inputmode="decimal" step="any" min="0" value="${item.qty}" aria-label="Quantity"><button type="button" data-step="1" aria-label="One more">+</button></div>
-      ${unitPicker(item.unit)}
+    <div class="row2">
+      <label>How many
+        <div class="stepper big"><button type="button" data-step="-1" aria-label="One less">−</button><input name="qty" type="number" inputmode="decimal" step="any" min="0" value="${item.qty}" aria-label="Quantity"><button type="button" data-step="1" aria-label="One more">+</button></div>
+      </label>
+      <label>Counted in ${unitPicker(item.unit)}</label>
     </div>
-    <span class="label">Kept in</span>
-    ${locationPicker(item.location)}
-    <span class="label">Buy at</span>
-    ${storePicker(item.store || '')}
+    <div class="row2">
+      <label>Kept in ${locationPicker(item.location)}</label>
+      <label>Buy at ${storePicker(item.store || '')}</label>
+    </div>
     <label>Use by <span style="font-weight:400">(optional)</span><input name="useBy" type="date" value="${esc(item.useBy || '')}"></label>
     <details><summary>Shopping & scanning</summary>
       <div class="row2">
@@ -808,7 +803,6 @@ $('#main').addEventListener('click', (e) => {
     showEditorPhoto(form);
   }
   // The emoji placeholder follows the name and place as you edit them.
-  if (e.target.closest('[data-pick="location"]') && ui.editor.photo === undefined && !item.image) setTimeout(() => ui.editor && showEditorPhoto(form));
   if (act === 'delete' && confirm(`Delete ${item.name}?`)) {
     closeEditor(null);
     deleteItem(item);
@@ -817,7 +811,7 @@ $('#main').addEventListener('click', (e) => {
 
 $('#main').addEventListener('input', (e) => {
   const form = e.target.closest('#editForm');
-  if (form && e.target.name === 'name' && ui.editor && ui.editor.photo === undefined && !ui.editor.item.image) showEditorPhoto(form);
+  if (form && ['name', 'location'].includes(e.target.name) && ui.editor && ui.editor.photo === undefined && !ui.editor.item.image) showEditorPhoto(form);
 });
 
 $('#main').addEventListener('submit', (e) => {
