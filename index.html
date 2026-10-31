@@ -3,21 +3,21 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#f6f5f1" media="(prefers-color-scheme: light)">
-  <meta name="theme-color" content="#121413" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f4ede3" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#1b1613" media="(prefers-color-scheme: dark)">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
-  <meta name="apple-mobile-web-app-title" content="Homestock">
-  <title>Homestock</title>
+  <meta name="apple-mobile-web-app-title" content="Key Record">
+  <title>Key Record</title>
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="apple-touch-icon.png">
-  <link rel="stylesheet" href="styles.css?v=20">
+  <link rel="stylesheet" href="styles.css?v=21">
 </head>
 <body>
   <header class="top">
     <div class="title-row">
-      <h1 id="title">Homestock</h1>
+      <h1 id="title">Key Record</h1>
       <button id="menuBtn" class="icon-btn" aria-label="More options">
         <svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
       </button>
@@ -100,12 +100,12 @@
         if (!tried) return freshReload();
         var box = document.createElement('div');
         box.className = 'boot-fail';
-        box.innerHTML = '<p>Homestock didn’t start properly. Your items are safe.</p><button type="button">Reload</button>';
+        box.innerHTML = '<p>Key Record didn’t start properly. Your items are safe.</p><button type="button">Reload</button>';
         box.querySelector('button').onclick = freshReload;
         document.body.appendChild(box);
       }, 5000);
     })();
   </script>
-  <script type="module" src="app.js?v=20"></script>
+  <script type="module" src="app.js?v=21"></script>
 </body>
 </html>

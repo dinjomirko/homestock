@@ -1,4 +1,4 @@
-# Homestock
+# Key Record
 
 **Live:** https://dinjomirko.github.io/homestock/
 

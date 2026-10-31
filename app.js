@@ -1,4 +1,4 @@
-import { parseCommand, resolveActions, matchItem, matchExact, guessLocation, guessEmoji, parsePack, DEFAULT_LOCATIONS } from './parser.js?v=20';
+import { parseCommand, resolveActions, matchItem, matchExact, guessLocation, guessEmoji, parsePack, DEFAULT_LOCATIONS } from './parser.js?v=21';
 
 const APP_VERSION = new URL(import.meta.url).searchParams.get('v') || 'dev';
 const STORAGE_KEY = 'homestock.v1';
@@ -47,7 +47,7 @@ function save() {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   } catch {
-    setTimeout(() => toast('Couldn’t save — this phone’s storage for Homestock is full. Remove some photos, or back up from the ⋯ menu.'), 0);
+    setTimeout(() => toast('Couldn’t save — this phone’s storage for Key Record is full. Remove some photos, or back up from the ⋯ menu.'), 0);
   }
   // Ask the browser not to clear this data when space runs low.
   if (!persistAsked) {
@@ -156,7 +156,7 @@ function render() {
     t.setAttribute('aria-current', t.dataset.view === ui.view ? 'page' : 'false');
   });
   $('#stockTools').hidden = ui.view !== 'stock';
-  $('#title').textContent = ui.view === 'stock' ? 'Homestock' : 'Shopping';
+  $('#title').textContent = ui.view === 'stock' ? 'Key Record' : 'Shopping';
   const shopCount = shoppingItems().filter((i) => !ui.bought.has(i.id)).length;
   $('#shopBadge').hidden = !shopCount;
   $('#shopBadge').textContent = shopCount;
@@ -867,7 +867,7 @@ function openMenu() {
       <button data-menu="sample">Load sample items</button>
       <button data-menu="erase" class="danger">Erase everything</button>
     </div>
-    <p class="note" style="text-align:center">Homestock version ${esc(APP_VERSION)}</p>`);
+    <p class="note" style="text-align:center">Key Record version ${esc(APP_VERSION)}</p>`);
 }
 
 async function shareText(text, title) {
@@ -928,7 +928,7 @@ function shareKitchen() {
 
 function exportBackup() {
   const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
-  const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: `homestock-${new Date().toISOString().slice(0, 10)}.json` });
+  const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: `key-record-${new Date().toISOString().slice(0, 10)}.json` });
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
@@ -943,7 +943,7 @@ async function importBackup(file) {
     save();
     toast('Backup restored', { undo: true });
   } catch {
-    toast("That file isn't a Homestock backup");
+    toast("That file isn't a Key Record backup");
   }
 }
 

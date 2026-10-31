@@ -1,11 +1,11 @@
 {
-  "name": "Homestock",
-  "short_name": "Homestock",
+  "name": "Key Record",
+  "short_name": "Key Record",
   "description": "Know what you have at home: pantry, bathroom, garage.",
   "start_url": "./",
   "display": "standalone",
-  "background_color": "#f6f5f1",
-  "theme_color": "#1f7a5c",
+  "background_color": "#f4ede3",
+  "theme_color": "#6e2a2a",
   "icons": [
     { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml" },
     { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
