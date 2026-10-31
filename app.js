@@ -1,11 +1,11 @@
 import {
   parseCommand, resolveActions, matchItem, matchExact, guessLocation, guessEmoji, parsePack, parseListLines,
   suggestShelfLife, openLife, isoDate, DEFAULT_LOCATIONS,
-} from './parser.js?v=29';
+} from './parser.js?v=30';
 import {
   initSync, pushSoon, syncInfo, createHousehold, joinHousehold, leaveHousehold, authenticate, useHousehold, signOut,
   removeMember, newJoinCode, renameMe,
-} from './sync.js?v=29';
+} from './sync.js?v=30';
 
 const APP_VERSION = new URL(import.meta.url).searchParams.get('v') || 'dev';
 const STORAGE_KEY = 'homestock.v1';
@@ -214,31 +214,40 @@ function moveItem(it, from, place, spot = '') {
   it.updated = Date.now();
 }
 
-// Places and their spots as buttons: drop targets while dragging, or choices in the Move sheet.
+// Places and their spots as buttons, in the tray at the bottom: drop targets while dragging, or
+// one tap to move everything picked.
 function placeChoices({ current = null, adding = false } = {}) {
   const on = (pl, sp) => (current && current.place === pl && current.spot === sp ? 'current' : '');
   return `<div class="move-grid">${allLocations().map((pl) => `
-    <div class="move-place ${adding || spotsIn(pl).length ? 'wide' : ''}">
+    <div class="move-place ${spotsIn(pl).length ? 'wide' : ''}">
       <button type="button" class="${on(pl, '')}" data-move-place="${esc(pl)}" data-move-spot="">${esc(pl)}</button>
-      <div class="move-spots">${spotsIn(pl).map((sp) => `<button type="button" class="spot ${on(pl, sp)}" data-move-place="${esc(pl)}" data-move-spot="${esc(sp)}">${esc(sp)}</button>`).join('')}${
-        adding ? `<button type="button" class="spot new" data-move-place="${esc(pl)}" data-move-spot="__new" aria-label="New spot in the ${esc(pl.toLowerCase())}">+ Spot</button>` : ''}</div>
+      ${spotsIn(pl).length ? `<div class="move-spots">${spotsIn(pl).map((sp) => `<button type="button" class="spot ${on(pl, sp)}" data-move-place="${esc(pl)}" data-move-spot="${esc(sp)}">${esc(sp)}</button>`).join('')}</div>` : ''}
     </div>`).join('')}
-    ${adding ? '<button type="button" class="new-place" data-move-place="__new" data-move-spot="">+ New place</button>' : ''}</div>`;
+    ${adding ? '<button type="button" class="new-place" data-move-place="__new" data-move-spot="" aria-label="New place or spot">+ New…</button>' : ''}</div>`;
+}
+
+// "Garage shelf 4", "Garage, shelf 4" or "Basement" → a place and maybe a spot in it.
+function parseWhere(text) {
+  const t = text.trim().replace(/\s+/g, ' ');
+  const lower = t.toLowerCase();
+  const known = [...allLocations()].sort((a, b) => b.length - a.length)
+    .find((pl) => lower === pl.toLowerCase() || lower.startsWith(pl.toLowerCase() + ' ') || lower.startsWith(pl.toLowerCase() + ','));
+  const [place, spot = ''] = known ? [known, t.slice(known.length)] : t.split(/\s*[,·]\s*/);
+  // "bin a" → "Bin A", like the spots voice understands.
+  return { place: known || sentenceCase(place), spot: sentenceCase(spot.replace(/^[\s,·:-]+/, '')).replace(/ ([a-z])$/, (m, c) => ` ${c.toUpperCase()}`) };
 }
 
 // Move picked rows ({id, from}) to a place and spot, asking for a name when it's a new one.
 function moveTo(picks, place, spot = '') {
   if (place === '__new') {
-    place = sentenceCase(prompt('Name the new place (e.g. Basement, Hall closet)')?.trim() || '');
+    const typed = prompt('Where to? A new place, or a spot in one (e.g. Basement, or Garage shelf 4)')?.trim();
+    if (!typed) return;
+    ({ place, spot } = parseWhere(typed));
     if (!place) return;
     if (!allLocations().includes(place)) {
       prefs.places = [...allLocations(), place];
       savePrefs();
     }
-  }
-  if (spot === '__new') {
-    spot = sentenceCase(prompt(`Name a spot in the ${place.toLowerCase()} (e.g. Shelf 2, Top drawer, Bin A)`)?.trim() || '');
-    if (!spot) return;
     addSpot(place, spot);
   }
   const moving = picks.map((p) => ({ it: byId(p.id), from: p.from || null })).filter((p) => p.it);
@@ -250,7 +259,6 @@ function moveTo(picks, place, spot = '') {
     prefs.moveTipSeen = true;
     savePrefs();
   }
-  if (moving.length === 1) ui.flash = moving[0].it.id;
   buzz(20);
   save();
   const what = moving.length === 1 ? moving[0].it.name : `${new Set(moving.map((p) => p.it.id)).size} items`;
@@ -334,6 +342,7 @@ function render() {
   }
   $('#main').innerHTML = ui.view === 'stock' ? renderStock() : ui.view === 'shop' ? renderShop() : renderCook();
   if (ui.view === 'cook') updateCookSummary();
+  renderPickTray();
   if (ui.flash) $('#main .flash')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   ui.flash = null;
 }
@@ -388,21 +397,20 @@ function itemRow(it, showLoc, place = null) {
   </li>`;
 }
 
-// One place's items, under small spot headings when any of them has a spot.
+// One place's items: those without a spot first, then each spot under a small heading.
 function placeList(group, place) {
   const order = (it) => {
     const sp = shelfAt(it, place);
-    if (!sp) return 9999;
+    if (!sp) return -1;
     const i = spotsIn(place).indexOf(sp);
     return i >= 0 ? i : 999;
   };
   const sorted = [...group].sort((a, b) => order(a) - order(b) || shelfAt(a, place).localeCompare(shelfAt(b, place)) || a.name.localeCompare(b.name));
-  const anySpot = sorted.some((i) => shelfAt(i, place));
-  let last = null;
+  let last = '';
   let html = '';
   for (const it of sorted) {
     const sp = shelfAt(it, place);
-    if (anySpot && sp !== last) html += `<li class="sub-head">${esc(sp || 'No spot set')}</li>`;
+    if (sp && sp !== last) html += `<li class="sub-head">${esc(sp)}</li>`;
     last = sp;
     html += itemRow(it, false, place);
   }
@@ -463,19 +471,11 @@ function renderStock() {
     const place = ui.loc !== 'All' && ui.loc !== 'soon' && !q ? ui.loc : null;
     html = `<ul class="list stock-list" style="margin-top:12px">${place ? placeList(items, place) : items.map((i) => itemRow(i, true)).join('')}</ul>`;
   }
-  if (ui.select) {
-    const n = ui.select.size;
-    return `<div class="stock-bar"><p class="note">Tap items to pick them, then move them together.</p></div>` + html +
-      `<div class="select-bar" role="toolbar" aria-label="Selected items">
-        <button class="link" data-act="select-done">Cancel</button>
-        <span>${n ? `${n} selected` : 'None selected'}</span>
-        <button class="btn primary" data-act="move-picked" ${n ? '' : 'disabled'}>Move to…</button>
-      </div>`;
-  }
+  if (ui.select) return html;
   const tip = !prefs.stockSwipeTipSeen
-    ? 'Swipe an item right to add it to the shopping list, or left to delete it. Press and hold to drag it to another place.'
-    : !prefs.moveTipSeen ? 'Press and hold an item to drag it to another place or spot.' : '';
-  return `<div class="stock-bar"><p class="note">${tip}</p><button class="link" data-act="select">Select</button></div>` +
+    ? 'Swipe an item right to add it to the shopping list, or left to delete it. Press and hold to move it.'
+    : !prefs.moveTipSeen ? 'Press and hold an item to move it. Let go without dragging to pick several.' : '';
+  return (tip ? `<p class="note stock-tip">${tip}</p>` : '') +
     html + listNote + `<div class="add-pair"><button class="add-row" data-act="add">+ Add an item</button><button class="add-row" data-act="paste">Paste a list</button></div>`;
 }
 
@@ -1111,14 +1111,19 @@ function selectPicker(field, options, current, { label, other, text = (v) => v }
     .join('')}<option value="__new">${esc(other.label)}</option></select>`;
 }
 
-const locationPicker = (current) =>
-  selectPicker('location', allLocations(), current, { label: 'Kept in', other: { label: '+ New place…', ask: 'Name the new place (e.g. Basement, Laundry room)' } });
-
 const storePicker = (current) =>
   selectPicker('store', ['', ...allStores()], current, { label: 'Buy at', text: (v) => v || 'Any store', other: { label: '+ New store…', ask: 'Store name (e.g. Costco, Aldi)' } });
 
-const shelfPicker = (place, current) =>
-  selectPicker('shelf', ['', ...spotsIn(place)], current, { label: 'Spot', text: (v) => v || 'Anywhere', other: { label: '+ New spot…', ask: `Name a spot in the ${place.toLowerCase()} (e.g. Shelf 2, Top drawer, Bin A)` } });
+// Where it's kept, in one dropdown: each place followed by its spots ("Garage · Shelf 2").
+// The choice lands in the hidden location and shelf fields the rest of the page reads.
+function wherePicker(place, spot) {
+  const opts = allLocations().flatMap((pl) => [[pl, ''], ...spotsIn(pl).map((sp) => [pl, sp])]);
+  if (!opts.some(([p, s]) => p === place && s === spot)) opts.push([place, spot]);
+  return `<select name="where" aria-label="Kept in">${opts
+    .map(([p, s]) => `<option value="${esc(p)}\t${esc(s)}" ${p === place && s === spot ? 'selected' : ''}>${esc(s ? `${p} · ${s}` : p)}</option>`)
+    .join('')}<option value="__new">+ New place or spot…</option></select>
+    <input type="hidden" name="location" value="${esc(place)}"><input type="hidden" name="shelf" value="${esc(spot)}">`;
+}
 
 const unitPicker = (current) =>
   selectPicker('unit', UNIT_CHOICES, current, { label: 'Counted in', text: (v) => v || 'each', other: { label: 'Other…', ask: 'Counted in what? (e.g. tube, carton, pound)' } });
@@ -1136,8 +1141,6 @@ document.addEventListener('change', (e) => {
     value = field === 'unit' ? singularUnit(value) : field === 'store' ? titleCase(value) : sentenceCase(value);
     if (![...sel.options].some((o) => o.value === value)) sel.querySelector('[value="__new"]').insertAdjacentHTML('beforebegin', `<option value="${esc(value)}">${esc(value)}</option>`);
     sel.value = value;
-    // A new spot belongs to its place straight away, so it survives switching places.
-    if (field === 'shelf' && sel.form?.location) addSpot(sel.form.location.value, value);
   }
   sel.dataset.prev = sel.value;
 });
@@ -1261,11 +1264,8 @@ function renderEditor() {
       </label>
       <label>Counted in ${unitPicker(item.unit)}</label>
     </div>
-    <div class="row2">
-      <label>Kept in ${locationPicker(item.location)}</label>
-      <label>Spot <span id="shelfPick">${shelfPicker(item.location, item.shelf || '')}</span></label>
-    </div>
-    <div class="row2">
+    <div class="row2 wide-first">
+      <label>Kept in <span id="wherePick">${wherePicker(item.location, item.shelf || '')}</span></label>
       <label>Buy at ${storePicker(item.store || '')}</label>
     </div>
     <div id="spots">${spotsHtml(item.location)}</div>
@@ -1358,22 +1358,33 @@ $('#main').addEventListener('change', (e) => {
     ui.editor.spots[e.target.value] = 1;
     redrawSpots(form);
   }
-  // Making another place the main one folds its count into the main count.
-  if (e.target.name === 'location' && e.target.value !== '__new') {
-    syncSpots(form);
-    const pl = e.target.value;
-    $('#shelfPick', form).innerHTML = shelfPicker(pl, pl === ui.editor.item.location ? ui.editor.item.shelf || '' : '');
-    if (pl in ui.editor.spots) {
-      form.qty.value = round((parseFloat(form.qty.value) || 0) + ui.editor.spots[pl]);
-      delete ui.editor.spots[pl];
+  if (e.target.name === 'where') {
+    let [pl, sp = ''] = e.target.value.split('\t');
+    if (e.target.value === '__new') {
+      const typed = prompt('A new place, or a spot in one (e.g. Basement, or Garage shelf 4)')?.trim();
+      ({ place: pl, spot: sp } = typed ? parseWhere(typed) : { place: form.location.value, spot: form.shelf.value });
+      if (sp) addSpot(pl, sp);
+      $('#wherePick', form).innerHTML = wherePicker(pl, sp);
     }
-    redrawSpots(form);
+    const moved = pl !== form.location.value;
+    form.location.value = pl;
+    form.shelf.value = sp;
+    // Making another place the main one folds its count into the main count.
+    if (moved) {
+      syncSpots(form);
+      if (pl in ui.editor.spots) {
+        form.qty.value = round((parseFloat(form.qty.value) || 0) + ui.editor.spots[pl]);
+        delete ui.editor.spots[pl];
+      }
+      redrawSpots(form);
+      if (ui.editor.photo === undefined && !ui.editor.item.image) showEditorPhoto(form);
+    }
   }
 });
 
 $('#main').addEventListener('input', (e) => {
   const form = e.target.closest('#editForm');
-  if (form && ['name', 'location'].includes(e.target.name) && ui.editor && ui.editor.photo === undefined && !ui.editor.item.image) showEditorPhoto(form);
+  if (form && e.target.name === 'name' && ui.editor && ui.editor.photo === undefined && !ui.editor.item.image) showEditorPhoto(form);
 });
 
 $('#main').addEventListener('submit', (e) => {
@@ -2694,6 +2705,7 @@ $('#main').addEventListener('click', (e) => {
     const keys = group.map((i) => pickKey(i.id, place));
     const all = keys.every((k) => ui.select.has(k));
     group.forEach((i, n) => (all ? ui.select.delete(keys[n]) : ui.select.set(keys[n], { id: i.id, from: place })));
+    if (!ui.select.size) ui.select = null;
     return render();
   }
   const fold = e.target.closest('[data-fold]');
@@ -2710,25 +2722,14 @@ $('#main').addEventListener('click', (e) => {
     case 'inc': return bump(item, 1, btn.dataset.place || null);
     case 'dec': return bump(item, -1, btn.dataset.place || null);
     case 'paste': return openPaste();
-    case 'select':
-      ui.select = new Map();
-      return render();
-    case 'select-done':
-      ui.select = null;
-      return render();
     case 'pick': {
       const from = btn.closest('[data-place]').dataset.place || null;
       const key = pickKey(item.id, from);
       if (ui.select.has(key)) ui.select.delete(key);
       else ui.select.set(key, { id: item.id, from });
+      if (!ui.select.size) ui.select = null;
       buzz(10);
       return render();
-    }
-    case 'move-picked': {
-      const n = new Set([...ui.select.values()].map((p) => p.id)).size;
-      return openSheet(`
-        <div class="sheet-head"><h2>Move ${n === 1 ? byId([...ui.select.values()][0].id)?.name.toLowerCase() || '1 item' : `${n} items`} to…</h2><button class="link" data-close>Cancel</button></div>
-        <div class="picker">${placeChoices({ adding: true })}</div>`);
     }
     case 'edit': return openEditor(item);
     case 'got': return markBought(item);
@@ -2783,7 +2784,7 @@ function startDrag() {
   const place = row.dataset.place || it.location;
   tray.innerHTML = row.closest('.shop-list')
     ? `<p>Drop on a store</p>${storeChoices(it, 'data-drop-store')}`
-    : `<p>Drop on a place or spot</p>${placeChoices({ current: { place, spot: shelfAt(it, place) } })}`;
+    : `<p>Drop on a place or spot · or let go to pick more</p>${placeChoices({ current: { place, spot: shelfAt(it, place) } })}`;
   tray.hidden = false;
   buzz(25);
 }
@@ -2800,10 +2801,39 @@ function endDrag() {
   clearTimeout(drag.timer);
   drag.ghost?.remove();
   drag.row.classList.remove('drag-src');
-  $('#dropTray').hidden = true;
-  $('#dropTray').innerHTML = '';
   drag = null;
+  renderPickTray();
 }
+
+// While picking several Stock items, the tray stays put: tap where they all go.
+function renderPickTray() {
+  const tray = $('#dropTray');
+  if (drag?.active) return;
+  if (!ui.select || ui.view !== 'stock' || ui.editor || ui.paste || ui.account) {
+    tray.hidden = true;
+    tray.innerHTML = '';
+    tray.classList.remove('picking');
+    tray.setAttribute('aria-hidden', 'true');
+    return;
+  }
+  const n = new Set([...ui.select.values()].map((p) => p.id)).size;
+  tray.innerHTML = `<div class="tray-head"><p>${n} picked · tap where ${n === 1 ? 'it goes' : 'they go'}</p><button class="link" data-pick-done>Cancel</button></div>
+    ${placeChoices({ adding: true })}`;
+  tray.classList.add('picking');
+  tray.setAttribute('aria-hidden', 'false');
+  tray.hidden = false;
+  document.documentElement.style.setProperty('--tray-h', `${tray.offsetHeight}px`);
+}
+
+$('#dropTray').addEventListener('click', (e) => {
+  if (!ui.select) return;
+  if (e.target.closest('[data-pick-done]')) {
+    ui.select = null;
+    return render();
+  }
+  const dest = e.target.closest('[data-move-place]');
+  if (dest) moveTo([...ui.select.values()], dest.dataset.movePlace, dest.dataset.moveSpot);
+});
 
 $('#main').addEventListener('pointermove', (e) => {
   if (!drag || e.pointerId !== drag.id) return;
@@ -2823,9 +2853,17 @@ $('#main').addEventListener('pointerup', (e) => {
   const target = dropTargetAt(e.clientX, e.clientY);
   const it = byId(drag.row.dataset.id);
   const from = drag.row.dataset.place || null;
+  // Let go where you pressed (on Stock): start picking, with this one picked.
+  const stayed = !target && !drag.row.closest('.shop-list') && Math.hypot(e.clientX - drag.x, e.clientY - drag.y) < 24;
+  if (stayed) {
+    ui.select = new Map([[pickKey(it.id, from), { id: it.id, from }]]);
+    buzz(10);
+  }
+  drag.active = false;
   endDrag();
   lastSwipeAt = Date.now();
-  if (target?.dataset.dropStore != null) assignStore(it, target.dataset.dropStore);
+  if (stayed) render();
+  else if (target?.dataset.dropStore != null) assignStore(it, target.dataset.dropStore);
   else if (target) {
     const { movePlace: place, moveSpot: spot } = target.dataset;
     if (place !== (from || it.location) || spot !== shelfAt(it, place)) moveTo([{ id: it.id, from }], place, spot);
@@ -2949,12 +2987,6 @@ $('#sheet').addEventListener('click', (e) => {
     $('#typeInput').value = example.textContent;
     $('#typeInput').focus();
     return;
-  }
-  const dest = e.target.closest('[data-move-place]');
-  if (dest && ui.select) {
-    const picks = [...ui.select.values()];
-    closeSheet();
-    return moveTo(picks, dest.dataset.movePlace, dest.dataset.moveSpot);
   }
   const pick = e.target.closest('[data-assign-store]');
   if (pick) {

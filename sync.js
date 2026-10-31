@@ -4,7 +4,7 @@
 // in the background; changes from others arrive live and replace the local copy of an item
 // when they're newer. Each item is one row, so two people editing different things never
 // clash; the same item edited on two phones keeps whichever change came last.
-import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js?v=29';
+import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js?v=30';
 
 const LIB = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm';
 const META_KEY = 'homestock.sync';

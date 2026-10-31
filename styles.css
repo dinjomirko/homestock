@@ -231,6 +231,7 @@ h2.group { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; co
 }
 .form input[type="date"] { min-height: 46px; }
 .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.row2.wide-first { grid-template-columns: 3fr 2fr; }
 .stepper.big { margin-top: 6px; background: var(--bg); border: 1px solid var(--line); border-radius: 10px; }
 .stepper.big input { margin: 0; text-align: center; padding: 9px 0; font-weight: 700; border: 0; background: none; min-width: 0; }
 .form .primary { width: 100%; min-height: 52px; border-radius: 12px; margin-top: 22px; font-weight: 700; font-size: 17px; }
@@ -413,7 +414,7 @@ body.editing .top, body.editing .tabbar { display: none; }
 
 /* Places and spots: drag tray on Stock, and the Move sheet */
 /* Places without spots sit three to a row; a place with spots gets a row of its own. */
-.move-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 8px; }
+.move-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-auto-flow: row dense; gap: 8px; margin-top: 8px; }
 .move-place { display: grid; }
 .move-place.wide { grid-column: 1 / -1; grid-template-columns: calc((100% - 16px) / 3) 1fr; gap: 8px; align-items: start; }
 .move-spots { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -423,16 +424,14 @@ body.editing .top, body.editing .tabbar { display: none; }
 }
 .move-grid button.spot { border-width: 1px; font-weight: 500; font-size: 14px; padding: 4px 12px; }
 .move-grid button.current { border-color: var(--accent); color: var(--accent); }
-.move-grid button.new { border-color: transparent; background: none; color: var(--accent); font-weight: 600; padding: 4px 6px; }
 .move-grid .new-place { border: 1px dashed var(--accent); color: var(--accent); }
-.move-grid .new-place { grid-column: 1 / -1; justify-self: start; }
+
 .move-grid button.over { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); transform: scale(1.05); }
 .stock-list .swipe-row { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
 
-/* Stock: Select link, picking rows, and the bar that replaces the tabs while picking */
-.stock-bar { display: flex; align-items: center; gap: 12px; margin: 4px 4px 0; }
-.stock-bar .note { flex: 1; margin: 0; }
-.stock-bar + h2.group { margin-top: 6px; }
+/* Stock: picking several rows; the tray stays at the bottom in place of the tabs */
+.stock-tip { margin: 6px 4px 0; }
+.stock-tip + h2.group { margin-top: 10px; }
 .pick-all { all: unset; cursor: pointer; color: var(--accent); font-size: 11px; letter-spacing: .12em; padding: 8px 0 8px 16px; margin: -8px 0; }
 .pick-item { width: 100%; border: 0; text-align: left; font: inherit; color: inherit; cursor: pointer; }
 .pick-item .info { padding: 6px 0; }
@@ -444,14 +443,10 @@ body.editing .top, body.editing .tabbar { display: none; }
 .pick-item.picked .tick { background: var(--accent); border-color: var(--accent); }
 .pick-item.picked .tick svg { opacity: 1; }
 body.selecting .tabbar { display: none; }
-.select-bar {
-  position: fixed; left: 0; right: 0; bottom: 0; z-index: 11; display: flex; align-items: center; gap: 12px;
-  height: calc(var(--tabbar-h) + env(safe-area-inset-bottom)); padding: 0 max(16px, calc(50% - 300px)) env(safe-area-inset-bottom);
-  background: var(--card); border-top: 1px solid var(--line); box-shadow: 0 -6px 20px rgba(42, 30, 18, .08); animation: up .18s ease-out;
-}
-.select-bar span { flex: 1; text-align: center; font-weight: 600; }
-.select-bar .btn { min-height: 44px; padding: 0 18px; }
-.select-bar .btn:disabled { opacity: .4; }
+body.selecting { padding-bottom: calc(var(--tray-h, 240px) + env(safe-area-inset-bottom) + 24px); }
+.drop-tray.picking { max-height: 46vh; overflow-y: auto; overscroll-behavior: contain; }
+.tray-head { display: flex; align-items: center; gap: 12px; margin: -6px 0 -4px; }
+.tray-head p { flex: 1; text-align: left; }
 
 .list-note { display: flex; align-items: center; gap: 12px; margin-top: 14px; padding: 12px 14px; }
 .list-note p { margin: 0; flex: 1; color: var(--ink); font-size: 14px; }
