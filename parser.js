@@ -29,6 +29,10 @@ const ACTION_PHRASES = {
     'getting low on', 'low on', 'almost out of', 'nearly out of', 'buy more', 'get more',
     'pick up more', 'should buy', 'should get',
   ],
+  unlist: [
+    "don't need", 'dont need', 'do not need', 'no longer need', "don't need any", 'cross off', 'cross',
+    'scratch off', 'scratch',
+  ],
   set: [
     'have', 'has', 'have got', "i've got", "we've got", 'ive got', 'weve got', "i've", "we've",
     'there are', 'there is', "there's", 'theres', 'only have', 'set', 'count', 'update',
@@ -39,7 +43,7 @@ const ACTION_PHRASES = {
     'using', 'used', 'use', 'took', 'take', 'taking', 'ate', 'eaten', 'eat', 'eating',
     'drank', 'drink', 'opened', 'open', 'opening', 'grabbed', 'grab', 'grabbing', 'consumed',
     'finished', 'pulled', 'pull', 'gave away', 'cooked with', 'baked with', 'have used',
-    'have been using', 'had',
+    'have been using', 'had', 'delete', 'deleting',
   ],
   add: [
     'adding', 'added', 'add', 'bought', 'buying', 'buy', 'got', 'get', 'getting', 'picked up',
@@ -167,7 +171,7 @@ function parseClause(clause, prevAction, locByLower) {
     const t = s.match(TAIL);
     if (!t) break;
     const tail = t[2].trim();
-    if (/^(?:shopping |grocery )?list$/.test(tail)) action = 'need';
+    if (/^(?:shopping |grocery )?list$/.test(tail)) action = action === 'remove' || action === 'unlist' ? 'unlist' : 'need';
     else if (locByLower.has(tail)) location = locByLower.get(tail);
     else if (!STOCK_WORDS.has(tail)) break;
     s = t[1];
@@ -250,7 +254,7 @@ export function matchItem(query, items, preferStocked = false) {
     const precision = nameT.length ? nameT.filter((t) => q.includes(t)).length / nameT.length : 0;
     let score = coverage * 0.7 + precision * 0.3;
     if (preferStocked && item.qty > 0) score += 0.05;
-    if (!best || score > best.score) best = { item, score };
+    if (!best || score > best.score) best = { item, score, coverage };
   }
   return best;
 }
@@ -262,10 +266,10 @@ export function resolveActions(actions, items) {
   for (const a of actions) {
     const prefer = a.action === 'remove' || a.action === 'out';
     const m = matchItem(a.name, items, prefer);
-    if (!m && / and /.test(a.name)) {
+    if (/ and /.test(a.name) && !(m && m.coverage === 1)) {
       const parts = a.name.split(/\s+and\s+/).filter(Boolean);
       const ms = parts.map((p) => matchItem(p, items, prefer));
-      if (ms.every(Boolean) || a.action === 'need' || a.action === 'out') {
+      if (ms.every(Boolean) || ['need', 'out', 'unlist'].includes(a.action)) {
         parts.forEach((p, i) => out.push({ ...a, name: p, item: ms[i]?.item || null }));
         continue;
       }

@@ -65,6 +65,22 @@ test('questions are answered, not applied', () => {
   }
 });
 
+test('taking things off the shopping list', () => {
+  for (const [text, name] of [
+    ['remove milk from the shopping list', 'milk'],
+    ['take the coffee off the list', 'coffee'],
+    ["we don't need paper towels", 'paper towels'],
+    ['cross eggs off the list', 'eggs'],
+    ['delete olive oil from the grocery list', 'olive oil'],
+  ]) {
+    const a = one(text);
+    assert.deepEqual([a.action, a.name], ['unlist', name], text);
+  }
+  // Without "list" it still means using something up.
+  assert.equal(one('remove a roll of paper towels').action, 'remove');
+  assert.equal(one('add milk to the list').action, 'need');
+});
+
 test('location at the end of a sentence', () => {
   const a = one('Took 2 cans of paint out of the garage');
   assert.deepEqual([a.action, a.qty, a.name, a.location], ['remove', 2, 'paint', 'Garage']);
@@ -92,6 +108,14 @@ test('matching handles plurals, brands and partial names', () => {
 test('resolve splits "milk and eggs" when each matches', () => {
   const r = resolveActions(parseCommand('add milk and eggs to the shopping list'), items);
   assert.deepEqual(r.map((a) => a.item?.id), ['4', '5']);
+});
+
+test('an "and" list is split unless one item has every word', () => {
+  const r = resolveActions(parseCommand('add coffee and paper towels to the list'), items);
+  assert.deepEqual(r.map((a) => [a.name, a.item?.id ?? null]), [['coffee', null], ['paper towels', '1']]);
+  const chips = [...items, { id: '7', name: 'Salt and Vinegar Chips', qty: 2 }];
+  const r2 = resolveActions(parseCommand('used a bag of salt and vinegar chips'), chips);
+  assert.deepEqual(r2.map((a) => a.item?.id), ['7']);
 });
 
 test('guessing location and pack size', () => {

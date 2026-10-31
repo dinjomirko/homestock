@@ -149,6 +149,15 @@ h2.group { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; co
 .bought .check::before { background: var(--accent); }
 .bought .check svg { opacity: 1; color: var(--accent-ink); }
 .bought .name { text-decoration: line-through; color: var(--muted); }
+.swipe-row { position: relative; border-top: 1px solid var(--line); background: var(--danger); touch-action: pan-y; }
+.swipe-row:first-child { border-top: 0; }
+.swipe-row:not(.swipeable) { background: none; }
+.swipe-row > .item { border-top: 0; background: var(--card); position: relative; }
+.swipe-label { position: absolute; right: 18px; top: 50%; transform: translateY(-50%); color: #fff; font-weight: 700; font-size: 15px; opacity: .75; transition: opacity .1s; }
+.swipe-row.armed .swipe-label { opacity: 1; }
+.remove { flex: none; width: 44px; height: 44px; border: 0; background: none; border-radius: 50%; display: grid; place-items: center; color: var(--muted); }
+.remove svg { width: 18px; height: 18px; }
+.remove:active { background: var(--danger-soft); color: var(--danger); }
 .tag { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: var(--warn-soft); color: var(--warn); font-weight: 600; flex: none; }
 
 /* Tab bar */

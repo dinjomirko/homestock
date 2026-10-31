@@ -35,6 +35,12 @@ function savePrefs() {
 
 let persistAsked = false;
 function save() {
+  // A dismissed low-stock item comes back once its count changes; a list-only item
+  // becomes a normal stock item once you actually have some.
+  for (const it of state.items) {
+    if (it.skipAt != null && it.qty !== it.skipAt) delete it.skipAt;
+    if (it.listOnly && it.qty > 0) delete it.listOnly;
+  }
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   } catch {}
@@ -69,7 +75,7 @@ function newItem(fields) {
 }
 
 const byId = (id) => state.items.find((i) => i.id === id);
-const isLow = (it) => it.need || (it.low != null && it.qty <= it.low);
+const isLow = (it) => it.need || (it.low != null && it.qty <= it.low && it.skipAt !== it.qty);
 const shoppingItems = () => state.items.filter(isLow).sort((a, b) => a.location.localeCompare(b.location) || a.name.localeCompare(b.name));
 
 function allLocations() {
@@ -219,13 +225,17 @@ function renderChips() {
 }
 
 function shopRow(it, bought) {
-  const status = it.qty <= 0 ? 'out' : `${esc(qtyText(it))} left`;
-  return `<li class="item ${bought ? 'bought' : ''} ${ui.flash === it.id ? 'flash' : ''}" data-id="${it.id}">
-    <button class="check" data-act="${bought ? 'unbuy' : 'got'}" role="checkbox" aria-checked="${bought}" aria-label="${esc(it.name)}">
-      <svg viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></svg></button>
-    <button class="info" data-act="edit"><div class="name">${esc(it.name)}</div>
-      <div class="meta">${bought ? `Back in stock · ${esc(qtyText(it))}` : status}${it.brand ? ` · ${esc(it.brand)}` : ''}</div></button>
-    ${!bought && it.need && it.qty > (it.low ?? -1) ? '<span class="tag">Requested</span>' : ''}
+  const status = it.listOnly ? 'Not in stock' : it.qty <= 0 ? 'out' : `${esc(qtyText(it))} left`;
+  return `<li class="swipe-row ${bought ? '' : 'swipeable'}" data-id="${it.id}">
+    ${bought ? '' : '<span class="swipe-label" aria-hidden="true">Remove</span>'}
+    <div class="item ${bought ? 'bought' : ''} ${ui.flash === it.id ? 'flash' : ''}">
+      <button class="check" data-act="${bought ? 'unbuy' : 'got'}" role="checkbox" aria-checked="${bought}" aria-label="${esc(it.name)}">
+        <svg viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></svg></button>
+      <button class="info" data-act="edit"><div class="name">${esc(it.name)}</div>
+        <div class="meta">${bought ? `Back in stock · ${esc(qtyText(it))}` : status}${it.brand ? ` · ${esc(it.brand)}` : ''}</div></button>
+      ${bought ? '' : `<button class="remove" data-act="unlist" aria-label="Remove ${esc(it.name)} from the list">
+        <svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17"/></svg></button>`}
+    </div>
   </li>`;
 }
 
@@ -240,15 +250,17 @@ function renderShop() {
     html += `<div class="shop-head"><h2>${toBuy.length} to buy</h2><button class="btn small" data-act="share-list">Share</button></div>`;
     for (const loc of allLocations()) {
       const group = toBuy.filter((i) => i.location === loc);
-      if (group.length) html += `<h2 class="group">${esc(loc)}</h2><ul class="list">${group.map((i) => shopRow(i, false)).join('')}</ul>`;
+      if (group.length) html += `<h2 class="group">${esc(loc)}</h2><ul class="list shop-list">${group.map((i) => shopRow(i, false)).join('')}</ul>`;
     }
   } else if (!bought.length) {
     html += `<div class="empty"><div class="big">🛒</div><h2>Nothing to buy</h2>
       <p>Things land here on their own when they run low. You can also say “add coffee to the shopping list.”</p></div>`;
   }
   if (bought.length) {
-    html += `<h2 class="group"><span>In the cart · back in stock</span></h2><ul class="list">${bought.map((i) => shopRow(i, true)).join('')}</ul>
+    html += `<h2 class="group"><span>In the cart · back in stock</span></h2><ul class="list shop-list">${bought.map((i) => shopRow(i, true)).join('')}</ul>
       <p class="note" style="margin:8px 4px">Tapped one by mistake? Tap it again.</p>`;
+  } else if (toBuy.length) {
+    html += '<p class="note" style="margin:8px 4px">Tick things off as you shop. Swipe left or tap ✕ to take something off the list.</p>';
   }
   const kitchen = state.items.filter((i) => KITCHEN.includes(i.location) && i.qty > 0).length;
   html += `<div class="card">
@@ -271,7 +283,7 @@ function bump(it, dir) {
 }
 
 function markBought(it) {
-  ui.bought.set(it.id, { qty: it.qty, need: it.need });
+  ui.bought.set(it.id, { qty: it.qty, need: it.need, listOnly: it.listOnly });
   it.qty = Math.max(it.qty + (it.scanQty || 1), (it.low ?? 0) + 1);
   it.need = false;
   it.updated = Date.now();
@@ -286,6 +298,27 @@ function unmarkBought(it) {
   save();
 }
 
+// Off the list without opening it. Something that was only ever on the list goes away
+// entirely; anything in stock stays there, just not on the list until its count changes.
+function unlist(it) {
+  if (it.listOnly && it.qty <= 0) {
+    state.items = state.items.filter((i) => i !== it);
+  } else {
+    it.need = false;
+    if (isLow(it)) it.skipAt = it.qty;
+    it.updated = Date.now();
+  }
+}
+
+function removeFromList(it) {
+  if (!it) return;
+  checkpoint();
+  unlist(it);
+  buzz(15);
+  save();
+  toast(`Removed ${it.name} from the list`, { undo: true });
+}
+
 function addToList(text) {
   const actions = resolveActions(parseCommand(`need ${text}`), state.items);
   if (!actions.length) return;
@@ -293,7 +326,7 @@ function addToList(text) {
   for (const a of actions) {
     let it = a.item;
     if (!it) {
-      it = newItem({ name: sentenceCase(a.name), qty: 0, location: guessLocation(a.name) });
+      it = newItem({ name: sentenceCase(a.name), qty: 0, location: guessLocation(a.name), listOnly: true });
       state.items.push(it);
     }
     it.need = true;
@@ -321,7 +354,7 @@ function applyActions(actions) {
       continue;
     }
     const create = (qty) => {
-      it = newItem({ name: sentenceCase(a.name), qty, unit: a.unit || '', location: a.location || guessLocation(a.name) });
+      it = newItem({ name: sentenceCase(a.name), qty, unit: a.unit || '', location: a.location || guessLocation(a.name), listOnly: qty <= 0 && (a.action === 'need' || a.action === 'out') });
       state.items.push(it);
     };
     switch (a.action) {
@@ -353,6 +386,11 @@ function applyActions(actions) {
         it.need = true;
         done.push(`🛒 ${it.name} added to shopping list`);
         break;
+      case 'unlist':
+        if (!it || !isLow(it)) { problems.push(`“${a.name}” isn't on the shopping list`); continue; }
+        unlist(it);
+        done.push(`Took ${it.name} off the shopping list`);
+        continue;
     }
     if (a.unit && !it.unit) it.unit = a.unit;
     it.updated = Date.now();
@@ -641,15 +679,15 @@ function loadSample() {
     s('Diced tomatoes', 4, 'can', 'Pantry'),
     s('Spaghetti', 2, 'box', 'Pantry'),
     s('Black beans', 3, 'can', 'Pantry'),
-    s('Olive oil', 1, 'bottle', 'Pantry'),
+    s('Olive oil', 1, 'bottle', 'Pantry', { low: 1 }),
     s('Rice', 1, 'bag', 'Pantry', { low: 0 }),
-    s('Milk', 1, 'gallon', 'Fridge', { useBy: inDays(3) }),
+    s('Milk', 1, 'gallon', 'Fridge', { low: 1, useBy: inDays(3) }),
     s('Eggs', 12, '', 'Fridge', { scanQty: 12, low: 4, useBy: inDays(12) }),
     s('Cheddar cheese', 1, 'block', 'Fridge', { low: 0 }),
     s('Spinach', 1, 'bag', 'Fridge', { low: 0, useBy: inDays(1) }),
     s('Frozen peas', 2, 'bag', 'Freezer'),
     s('Toilet paper', 9, 'roll', 'Bathroom', { brand: 'Charmin', scanQty: 12, low: 4 }),
-    s('Toothpaste', 1, 'tube', 'Bathroom'),
+    s('Toothpaste', 1, 'tube', 'Bathroom', { low: 1 }),
     s('Shampoo', 1, 'bottle', 'Bathroom', { low: 0 }),
     s('Duct tape', 2, 'roll', 'Garage'),
     s('AA batteries', 8, '', 'Garage', { low: 4 }),
@@ -681,7 +719,7 @@ function openVoice() {
         <button type="button">Removing a roll of paper towels</button><button type="button">Used 2 cans of tomatoes and a box of spaghetti</button>
         <button type="button">Bought a dozen eggs</button><button type="button">We're out of milk</button>
         <button type="button">How many rolls of toilet paper do we have?</button><button type="button">We have 3 rolls of duct tape</button>
-        <button type="button">Add coffee to the shopping list</button>
+        <button type="button">Add coffee to the shopping list</button><button type="button">Take coffee off the list</button>
       </div>
     </div>`, () => {
     stopListening();
@@ -1324,13 +1362,14 @@ document.addEventListener('click', (e) => {
 
 $('#main').addEventListener('click', (e) => {
   const btn = e.target.closest('[data-act]');
-  if (!btn) return;
+  if (!btn || Date.now() - lastSwipeAt < 400) return;
   const item = byId(btn.closest('[data-id]')?.dataset.id);
   switch (btn.dataset.act) {
     case 'inc': return bump(item, 1);
     case 'dec': return bump(item, -1);
     case 'edit': return openEditor(item);
     case 'got': return markBought(item);
+    case 'unlist': return removeFromList(item);
     case 'unbuy': return unmarkBought(item);
     case 'add': return openEditor(newItem({ location: KITCHEN.includes(ui.loc) || DEFAULT_LOCATIONS.includes(ui.loc) ? ui.loc : 'Pantry', qty: 1 }), { isNew: true });
     case 'add-named': {
@@ -1342,6 +1381,52 @@ $('#main').addEventListener('click', (e) => {
     case 'recipe': return shareKitchen();
   }
 });
+
+// Swipe a shopping-list row left to take it off the list. The row only follows the finger
+// once the gesture is clearly sideways, so scrolling the list still works normally.
+let swipe = null;
+let lastSwipeAt = 0;
+const SWIPE_REMOVE = 90;
+
+$('#main').addEventListener('pointerdown', (e) => {
+  const row = e.target.closest('.swipe-row.swipeable');
+  if (!row || e.pointerType === 'mouse' || e.button > 0) return;
+  swipe = { row, item: row.querySelector('.item'), id: e.pointerId, x: e.clientX, y: e.clientY, dx: 0, active: false };
+});
+
+$('#main').addEventListener('pointermove', (e) => {
+  if (!swipe || e.pointerId !== swipe.id) return;
+  const dx = e.clientX - swipe.x;
+  const dy = e.clientY - swipe.y;
+  if (!swipe.active) {
+    if (Math.abs(dy) > 10 && Math.abs(dy) > Math.abs(dx)) return (swipe = null);
+    if (dx > -12) return;
+    swipe.active = true;
+    try { swipe.row.setPointerCapture(e.pointerId); } catch {}
+    swipe.item.style.transition = 'none';
+  }
+  swipe.dx = Math.min(0, dx);
+  swipe.item.style.transform = `translateX(${swipe.dx}px)`;
+  swipe.row.classList.toggle('armed', swipe.dx < -SWIPE_REMOVE);
+});
+
+function endSwipe(e) {
+  if (!swipe || e.pointerId !== swipe.id) return;
+  const { row, item, dx, active } = swipe;
+  swipe = null;
+  if (!active) return;
+  lastSwipeAt = Date.now();
+  item.style.transition = 'transform .18s ease-out';
+  if (dx < -SWIPE_REMOVE && e.type === 'pointerup') {
+    item.style.transform = 'translateX(-110%)';
+    setTimeout(() => removeFromList(byId(row.dataset.id)), 160);
+  } else {
+    item.style.transform = '';
+    row.classList.remove('armed');
+  }
+}
+$('#main').addEventListener('pointerup', endSwipe);
+$('#main').addEventListener('pointercancel', endSwipe);
 
 $('#main').addEventListener('submit', (e) => {
   if (e.target.id !== 'listAdd') return;
