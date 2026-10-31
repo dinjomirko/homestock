@@ -1,6 +1,6 @@
 // Network first so updates show up right away; falls back to the cache when offline.
 // Product lookups are never cached.
-const VERSION = 22;
+const VERSION = 23;
 const CACHE = `homestock-v${VERSION}`;
 const SHELL = [
   './', 'index.html', `styles.css?v=${VERSION}`, `app.js?v=${VERSION}`, `parser.js?v=${VERSION}`, 'scan-worker.js',

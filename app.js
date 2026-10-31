@@ -1,4 +1,7 @@
-import { parseCommand, resolveActions, matchItem, matchExact, guessLocation, guessEmoji, parsePack, DEFAULT_LOCATIONS } from './parser.js?v=22';
+import {
+  parseCommand, resolveActions, matchItem, matchExact, guessLocation, guessEmoji, parsePack, parseListLines,
+  suggestShelfLife, openLife, isoDate, DEFAULT_LOCATIONS,
+} from './parser.js?v=23';
 
 const APP_VERSION = new URL(import.meta.url).searchParams.get('v') || 'dev';
 const STORAGE_KEY = 'homestock.v1';
@@ -9,7 +12,14 @@ const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 const $ = (sel, el = document) => el.querySelector(sel);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const round = (n) => Math.round(n * 100) / 100;
-const fmt = (n) => (n === 0.5 ? '½' : String(round(n)));
+const FRACTIONS = { 0.1: '⅒', 0.25: '¼', 0.33: '⅓', 0.5: '½', 0.67: '⅔', 0.75: '¾' };
+// 1.5 → "1½", 0.25 → "¼" (what's left in an opened package).
+function fmt(n) {
+  n = round(n);
+  const whole = Math.floor(n);
+  const glyph = FRACTIONS[round(n - whole)];
+  return glyph ? `${whole || ''}${glyph}` : String(n);
+}
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 const sentenceCase = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 const titleCase = (s) => s.trim().replace(/(^|\s)\S/g, (c) => c.toUpperCase());
@@ -18,10 +28,10 @@ const buzz = (ms = 30) => navigator.vibrate?.(ms);
 // ---------- State ----------
 
 let state = load(STORAGE_KEY, { items: [] });
-const prefs = { scanMode: 'add', sound: true, stores: ['Costco', 'Aldi', 'Target', 'Walmart'], ...load(PREFS_KEY, {}) };
+const prefs = { scanMode: 'add', sound: true, stores: ['Costco', 'Aldi', 'Target', 'Walmart'], places: [...DEFAULT_LOCATIONS], ...load(PREFS_KEY, {}) };
 delete prefs.shopStore; // the store filter used to be remembered between launches; now it isn't
 // shopStore: the store picked at the top of the shopping list, for this visit only.
-const ui = { view: 'stock', loc: 'All', q: '', bought: new Map(), flash: null, editor: null, shopStore: 'all' };
+const ui = { view: 'stock', loc: 'All', q: '', bought: new Map(), flash: null, editor: null, paste: null, shopStore: 'all' };
 const undoStack = [];
 
 function load(key, fallback) {
@@ -43,7 +53,10 @@ function save() {
   for (const it of state.items) {
     if (it.skipAt != null && it.qty !== it.skipAt) delete it.skipAt;
     if (it.listOnly && it.qty > 0) delete it.listOnly;
+    if (it.qty <= 0) delete it.opened;
+    tidySpots(it);
   }
+  updateBadge();
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   } catch {
@@ -80,6 +93,68 @@ function newItem(fields) {
 }
 
 const byId = (id) => state.items.find((i) => i.id === id);
+
+// An item can be kept in several places: `location` is its main place, `spots` holds the
+// counts kept elsewhere, and `qty` is always the total.
+const spotTotal = (it) => Object.values(it.spots || {}).reduce((a, b) => a + b, 0);
+const countAt = (it, place) => (place === it.location ? round(it.qty - spotTotal(it)) : it.spots?.[place] || 0);
+const placesOf = (it) => [it.location, ...Object.keys(it.spots || {})];
+// Show it under each place that has some, or under its main place when it's out everywhere.
+const shownIn = (it) => {
+  const have = placesOf(it).filter((pl) => countAt(it, pl) > 0);
+  return have.length ? have : [it.location];
+};
+
+// Add to or take from one place. Without a place it's the main place; taking more than is
+// there stops at zero.
+function adjustAt(it, place, d) {
+  if (!place || place === it.location) {
+    it.qty = round(it.qty + Math.max(d, -countAt(it, it.location)));
+    return;
+  }
+  it.spots ||= {};
+  const change = Math.max(d, -(it.spots[place] || 0));
+  it.spots[place] = round((it.spots[place] || 0) + change);
+  it.qty = round(it.qty + change);
+}
+
+// Keep spots consistent after any change: using things up takes from the main place first,
+// then from the other places; empty places drop off.
+function tidySpots(it) {
+  if (!it.spots) return;
+  delete it.spots[it.location];
+  for (const [pl, n] of Object.entries(it.spots)) if (!(n > 0)) delete it.spots[pl];
+  let short = round(spotTotal(it) - it.qty);
+  for (const pl of Object.keys(it.spots)) {
+    if (short <= 0) break;
+    const take = Math.min(short, it.spots[pl]);
+    it.spots[pl] = round(it.spots[pl] - take);
+    short = round(short - take);
+    if (!it.spots[pl]) delete it.spots[pl];
+  }
+  if (!Object.keys(it.spots).length) delete it.spots;
+}
+
+const dateIn = (days) => {
+  const d = new Date();
+  return isoDate(new Date(d.getFullYear(), d.getMonth(), d.getDate() + days));
+};
+const todayIso = () => dateIn(0);
+
+// A fresh purchase gets a fresh use-by: from what you set last time, or a typical shelf life
+// for fresh food. Older stock still on hand keeps its earlier date.
+function freshUseBy(it, qtyBefore) {
+  if (it.noUseBy || (qtyBefore > 0 && it.useBy)) return;
+  const days = it.shelfLife || suggestShelfLife(it.name, it.location);
+  if (days) it.useBy = dateIn(days);
+}
+
+// Number of things to use within two days, on the home-screen icon (if turned on).
+function updateBadge() {
+  if (!prefs.badge || !navigator.setAppBadge) return;
+  const n = state.items.filter((i) => i.qty > 0 && daysLeft(i) !== null && daysLeft(i) <= 2).length;
+  (n ? navigator.setAppBadge(n) : navigator.clearAppBadge()).catch(() => {});
+}
 // Out of something that's on the shopping list: it lives on the list, not in Stock.
 const inStock = (it) => !(it.qty <= 0 && isLow(it));
 const isLow = (it) => it.need || (it.low != null && it.qty <= it.low && it.skipAt !== it.qty);
@@ -96,11 +171,12 @@ function shopStore() {
 }
 
 function allLocations() {
-  return [...new Set([...DEFAULT_LOCATIONS, ...state.items.map((i) => i.location)])];
+  return [...new Set([...prefs.places, ...state.items.flatMap(placesOf)])];
 }
 
 function pluralUnit(unit, n) {
-  if (!unit || n === 1) return unit || '';
+  if (!unit || n <= 1) return unit || ''; // "1 bottle", "½ bottle"
+
   if (/(ch|sh|x|s)$/.test(unit)) return unit + 'es';
   if (unit === 'loaf') return 'loaves';
   if (/[^aeiou]y$/.test(unit)) return unit.slice(0, -1) + 'ies';
@@ -150,7 +226,7 @@ function ago(ts) {
 // ---------- Rendering ----------
 
 function render() {
-  document.body.classList.toggle('editing', Boolean(ui.editor));
+  document.body.classList.toggle('editing', Boolean(ui.editor || ui.paste));
   document.querySelectorAll('.tab').forEach((t) => {
     t.classList.toggle('on', t.dataset.view === ui.view);
     t.setAttribute('aria-current', t.dataset.view === ui.view ? 'page' : 'false');
@@ -161,6 +237,10 @@ function render() {
   $('#shopBadge').hidden = !shopCount;
   $('#shopBadge').textContent = shopCount;
   if (ui.editor) return; // the editor page owns the screen while it's open
+  if (ui.paste) {
+    if (!$('#pasteForm')) $('#main').innerHTML = renderPaste();
+    return;
+  }
   $('#main').innerHTML = ui.view === 'stock' ? renderStock() : renderShop();
   if (ui.flash) $('#main .flash')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   ui.flash = null;
@@ -173,10 +253,22 @@ function thumb(it, asButton = true) {
     : `<div class="thumb" aria-hidden="true">${inner}</div>`;
 }
 
-function itemRow(it, showLoc) {
+function openedText(it) {
+  if (!it.opened || it.qty <= 0) return '';
+  const days = Math.round((new Date(todayIso() + 'T00:00') - new Date(it.opened + 'T00:00')) / 864e5);
+  return days <= 0 ? 'Opened today' : days === 1 ? 'Opened yesterday' : `Opened ${days} days ago`;
+}
+
+function itemRow(it, showLoc, place = null) {
   const listed = isLow(it);
-  const cls = it.qty <= 0 ? 'out' : listed ? 'low' : '';
-  const meta = [esc(it.brand), showLoc ? esc(it.location) : '', useByHtml(it), listed ? '<span class="warn">On list</span>' : '']
+  const here = place && it.spots ? countAt(it, place) : it.qty;
+  const cls = here <= 0 ? 'out' : listed ? 'low' : '';
+  const where = it.spots
+    ? place
+      ? `${fmt(it.qty)} total · ${placesOf(it).filter((pl) => pl !== place && countAt(it, pl) > 0).map((pl) => `${esc(pl)} ${fmt(countAt(it, pl))}`).join(', ')}`
+      : placesOf(it).map((pl) => `${esc(pl)} ${fmt(countAt(it, pl))}`).join(' · ')
+    : showLoc ? esc(it.location) : '';
+  const meta = [esc(it.brand), where, openedText(it), useByHtml(it), listed ? '<span class="warn">On list</span>' : '']
     .filter(Boolean).join(' · ');
   return `<li class="swipe-row swipeable" data-id="${it.id}" data-swipe-right="${listed ? 'unlist' : 'tolist'}" data-swipe-left="delete">
     <span class="swipe-label act-right ${listed ? 'off' : ''}" aria-hidden="true">${listed ? 'Off the list' : 'Add to list'}</span>
@@ -185,9 +277,9 @@ function itemRow(it, showLoc) {
       ${thumb(it)}
       <button class="info" data-act="edit"><div class="name">${esc(it.name)}</div>${meta ? `<div class="meta">${meta}</div>` : ''}</button>
       <div class="stepper">
-        <button data-act="dec" aria-label="One less ${esc(it.name)}" ${it.qty <= 0 ? 'disabled' : ''}>−</button>
-        <span class="qty ${cls}" aria-label="${esc(qtyText(it))}">${fmt(it.qty)}${it.unit ? `<small>${esc(pluralUnit(it.unit, it.qty))}</small>` : ''}</span>
-        <button data-act="inc" aria-label="One more ${esc(it.name)}">+</button>
+        <button data-act="dec" data-place="${esc(place || '')}" aria-label="One less ${esc(it.name)}" ${here <= 0 ? 'disabled' : ''}>−</button>
+        <span class="qty ${cls}" aria-label="${esc(qtyText(it, here))}">${fmt(here)}${it.unit ? `<small>${esc(pluralUnit(it.unit, here))}</small>` : ''}</span>
+        <button data-act="inc" data-place="${esc(place || '')}" aria-label="One more ${esc(it.name)}">+</button>
       </div>
     </div>
   </li>`;
@@ -208,8 +300,8 @@ function renderStock() {
     </div>`;
   }
   const q = ui.q.trim().toLowerCase();
-  const matches = (i) => `${i.name} ${i.brand} ${i.location}`.toLowerCase().includes(q);
-  let items = state.items.filter(inStock).filter((i) => ui.loc === 'All' || (ui.loc === 'soon' ? useSoon(i) : i.location === ui.loc));
+  const matches = (i) => `${i.name} ${i.brand} ${placesOf(i).join(' ')}`.toLowerCase().includes(q);
+  let items = state.items.filter(inStock).filter((i) => ui.loc === 'All' || (ui.loc === 'soon' ? useSoon(i) : shownIn(i).includes(ui.loc)));
   if (q) items = items.filter(matches);
   items.sort(ui.loc === 'soon' ? (a, b) => daysLeft(a) - daysLeft(b) : (a, b) => a.name.localeCompare(b.name));
   // Searching for something you're out of: point to the list rather than offering a duplicate.
@@ -233,20 +325,21 @@ function renderStock() {
   if (ui.loc === 'All' && !q) {
     html = allLocations()
       .map((loc) => {
-        const group = items.filter((i) => i.location === loc);
-        return group.length ? `<h2 class="group">${esc(loc)}</h2><ul class="list">${group.map((i) => itemRow(i, false)).join('')}</ul>` : '';
+        const group = items.filter((i) => shownIn(i).includes(loc));
+        return group.length ? `<h2 class="group">${esc(loc)}</h2><ul class="list">${group.map((i) => itemRow(i, false, loc)).join('')}</ul>` : '';
       })
       .join('');
   } else {
-    html = `<ul class="list" style="margin-top:12px">${items.map((i) => itemRow(i, ui.loc === 'All' || ui.loc === 'soon')).join('')}</ul>`;
+    const place = ui.loc !== 'All' && ui.loc !== 'soon' ? ui.loc : null;
+    html = `<ul class="list" style="margin-top:12px">${items.map((i) => itemRow(i, !place, place)).join('')}</ul>`;
   }
   const tip = prefs.stockSwipeTipSeen ? '' : '<p class="note" style="margin:10px 4px 0">Swipe an item right to add it to the shopping list, or left to delete it.</p>';
-  return tip + html + listNote + `<button class="add-row" data-act="add">+ Add an item</button>`;
+  return tip + html + listNote + `<div class="add-pair"><button class="add-row" data-act="add">+ Add an item</button><button class="add-row" data-act="paste">Paste a list</button></div>`;
 }
 
 function renderChips() {
   const counts = {};
-  state.items.filter(inStock).forEach((i) => (counts[i.location] = (counts[i.location] || 0) + 1));
+  state.items.filter(inStock).forEach((i) => shownIn(i).forEach((pl) => (counts[pl] = (counts[pl] || 0) + 1)));
   const locs = allLocations().filter((l) => counts[l]);
   const soon = state.items.filter(useSoon).length;
   if (ui.loc === 'soon' && !soon) ui.loc = 'All';
@@ -304,7 +397,8 @@ function renderShop() {
   html += `<form class="quick-add" id="listAdd">
       <input name="what" placeholder="${sel === 'all' ? 'Add to the list…' : `Add to the ${esc(sel)} list…`}" autocomplete="off" enterkeyhint="done" aria-label="Add to the shopping list">
       <button>Add</button>
-    </form>`;
+    </form>
+    <button class="link small paste-link" data-act="paste">Paste a list instead</button>`;
   const visible = listForStore(sel);
   if (visible.length) {
     html += `<div class="shop-head"><h2>${visible.length} to buy${sel === 'all' ? '' : ` at ${esc(sel)}`}</h2>
@@ -340,10 +434,11 @@ function renderShop() {
 
 // ---------- Changes ----------
 
-function bump(it, dir) {
+function bump(it, dir, place = null) {
   checkpoint();
   const wasInStock = inStock(it);
-  it.qty = round(Math.max(0, it.qty + dir));
+  if (place) adjustAt(it, place, dir);
+  else it.qty = round(Math.max(0, it.qty + dir));
   if (dir > 0 && it.qty > (it.low ?? -1)) it.need = false;
   it.updated = Date.now();
   buzz(15);
@@ -352,8 +447,10 @@ function bump(it, dir) {
 }
 
 function markBought(it) {
-  ui.bought.set(it.id, { qty: it.qty, need: it.need, listOnly: it.listOnly });
+  ui.bought.set(it.id, { qty: it.qty, need: it.need, listOnly: it.listOnly, useBy: it.useBy, spots: it.spots && { ...it.spots } });
+  const qtyBefore = it.qty;
   it.qty = Math.max(it.qty + (it.scanQty || 1), (it.low ?? 0) + 1);
+  freshUseBy(it, qtyBefore);
   it.need = false;
   it.updated = Date.now();
   buzz();
@@ -496,24 +593,56 @@ function applyActions(actions) {
       state.items.push(it);
     };
     switch (a.action) {
-      case 'remove':
+      case 'remove': {
         if (!it) { problems.push(`Couldn't find “${a.name}” in your stock`); continue; }
-        it.qty = round(Math.max(0, it.qty - a.qty));
-        done.push(`−${fmt(a.qty)} ${it.name} → ${qtyText(it)} left`);
+        // "…from the garage" takes from there; otherwise from the main place first.
+        const from = a.location && placesOf(it).includes(a.location) ? a.location : null;
+        if (from) adjustAt(it, from, -a.qty);
+        else it.qty = round(Math.max(0, it.qty - a.qty));
+        done.push(`−${fmt(a.qty)} ${it.name}${from && it.spots ? ` from the ${from.toLowerCase()}` : ''} → ${qtyText(it)} left`);
         break;
-      case 'add':
+      }
+      case 'add': {
+        const isNew = !it;
         if (!it) create(0);
-        it.qty = round(it.qty + a.qty);
+        const qtyBefore = it.qty;
+        // "Put 6 rolls of paper towels in the garage" for something kept elsewhere adds a second place.
+        const elsewhere = !isNew && a.location && a.location !== it.location;
+        if (elsewhere && qtyBefore > 0) adjustAt(it, a.location, a.qty);
+        else {
+          if (elsewhere) it.location = a.location;
+          it.qty = round(it.qty + a.qty);
+        }
         it.need = false;
-        done.push(`+${fmt(a.qty)} ${it.name} → ${qtyText(it)}${a.item ? '' : ' (new)'}`);
+        freshUseBy(it, qtyBefore);
+        done.push(`+${fmt(a.qty)} ${it.name}${elsewhere ? ` in the ${a.location.toLowerCase()}` : ''} → ${qtyText(it)}${isNew ? ' (new)' : it.spots ? ' total' : ''}`);
         break;
+      }
       case 'set':
         if (a.qty == null) { problems.push(`How many ${a.name}? Try “we have 4 ${a.name}”`); continue; }
         if (!it) create(0);
-        it.qty = a.qty;
+        if (a.location && placesOf(it).includes(a.location) && it.spots) adjustAt(it, a.location, a.qty - countAt(it, a.location));
+        else it.qty = a.qty;
         if (it.qty > (it.low ?? -1)) it.need = false;
         done.push(`${it.name} set to ${qtyText(it)}`);
         break;
+      case 'expiry':
+        if (!it) { problems.push(`Couldn't find “${a.name}” to set its use-by date`); continue; }
+        setUseBy(it, a.useBy);
+        done.push(`${it.name}: use by ${new Date(a.useBy + 'T00:00').toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })}`);
+        break;
+      case 'open': {
+        if (!it) { problems.push(`Couldn't find “${a.name}” in your stock`); continue; }
+        const days = markOpened(it);
+        done.push(`Opened ${it.name}${days ? ` · use within ${days} days` : ''}`);
+        break;
+      }
+      case 'level': {
+        if (!it) { problems.push(`Couldn't find “${a.name}” in your stock`); continue; }
+        setLevel(it, a.level);
+        done.push(it.qty === a.level ? `${it.name}: ${qtyText(it)} left` : `${it.name}: ${fmt(a.level)} left in the open ${it.unit || 'one'} · ${qtyText(it)} in all`);
+        break;
+      }
       case 'out':
         if (!it) create(0);
         it.qty = 0;
@@ -538,13 +667,22 @@ function applyActions(actions) {
         if (!it || !isLow(it)) it = matchExact(a.name, listed)?.item || matchItem(a.name, listed)?.item || it;
         if (!it) { problems.push(`Couldn't find “${a.name}” on the list or in stock`); continue; }
         if (isLow(it)) {
-          ui.bought.set(it.id, { qty: it.qty, need: it.need, listOnly: it.listOnly, location: it.location });
-          it.qty = a.qty != null ? round(it.qty + a.qty) : Math.max(it.qty + (it.scanQty || 1), (it.low ?? 0) + 1);
+          ui.bought.set(it.id, { qty: it.qty, need: it.need, listOnly: it.listOnly, location: it.location, useBy: it.useBy, spots: it.spots && { ...it.spots } });
+          const qtyBefore = it.qty;
+          const bought = a.qty != null ? a.qty : Math.max(it.scanQty || 1, (it.low ?? 0) + 1 - it.qty);
+          // Still have some in the main place? Then what you bought goes to the place you named.
+          if (a.location && a.location !== it.location && qtyBefore > 0) adjustAt(it, a.location, bought);
+          else {
+            if (a.location) it.location = a.location;
+            it.qty = round(it.qty + bought);
+          }
           it.need = false;
-          if (a.location) it.location = a.location;
-          done.push(`✓ ${it.name} bought · ${qtyText(it)} in the ${it.location.toLowerCase()}`);
+          freshUseBy(it, qtyBefore);
+          done.push(`✓ ${it.name} bought · ${qtyText(it)}${it.spots ? ' in all' : ` in the ${it.location.toLowerCase()}`}`);
         } else if (a.location && a.location !== it.location) {
+          // Moving it all: other places merge into the new one.
           it.location = a.location;
+          delete it.spots;
           done.push(`${it.name} moved to the ${it.location.toLowerCase()}`);
         } else {
           problems.push(`${it.name} isn't on the shopping list${a.location ? ` and is already in the ${a.location.toLowerCase()}` : ''}`);
@@ -575,14 +713,43 @@ function applyActions(actions) {
   return { done, problems, answers };
 }
 
+// Use-by set by hand or by voice; remembered as how long this item usually lasts.
+function setUseBy(it, useBy) {
+  it.useBy = useBy;
+  delete it.noUseBy;
+  const days = Math.round((new Date(useBy + 'T00:00') - new Date(todayIso() + 'T00:00')) / 864e5);
+  if (days >= 1 && days <= 120 && !it.opened) it.shelfLife = days;
+}
+
+// Opening starts the clock: things like milk or salsa only last so long once open.
+function markOpened(it, date = todayIso()) {
+  it.opened = date;
+  const days = openLife(it.name);
+  if (!days) return null;
+  const by = isoDate(new Date(new Date(date + 'T00:00').getTime() + days * 864e5));
+  if (!it.useBy || by < it.useBy) it.useBy = by;
+  return days;
+}
+
+// "Half a bottle left": the open one is part used; any unopened ones stay whole.
+function setLevel(it, level) {
+  const main = countAt(it, it.location);
+  const whole = main % 1 ? Math.floor(main) : Math.max(0, main - 1);
+  adjustAt(it, it.location, round(whole + level - main));
+  if (!it.opened) markOpened(it);
+}
+
 function answerFor(a) {
   const it = a.item;
   if (!it) return `You're not tracking ${a.name} yet.`;
-  const where = `in the ${it.location.toLowerCase()}`;
+  const have = placesOf(it).filter((pl) => countAt(it, pl) > 0);
+  const where = have.length > 1
+    ? `: ${have.map((pl) => `${fmt(countAt(it, pl))} in the ${pl.toLowerCase()}`).join(' and ')}`
+    : ` in the ${(have[0] || it.location).toLowerCase()}`;
   const list = isLow(it) ? ' It’s on the shopping list.' : '';
   if (it.qty <= 0) return `You're out of ${it.name.toLowerCase()}.${list}`;
   const amount = it.unit ? `${fmt(it.qty)} ${pluralUnit(it.unit, it.qty)} of ${it.name.toLowerCase()}` : `${fmt(it.qty)} ${it.name.toLowerCase()}`;
-  return `You have ${amount} ${where}.${list}`;
+  return `You have ${amount}${where}.${list}`;
 }
 
 // Speech engines give a few guesses; use the one that matches the most things you own.
@@ -731,9 +898,38 @@ function showEditorPhoto(form) {
   form.querySelector('.photo-actions').innerHTML = photoButtons(Boolean(image));
 }
 
+// Other places this item is kept, each with its own count, on the item page.
+function spotsHtml(main) {
+  const spots = ui.editor.spots;
+  const rows = Object.entries(spots)
+    .map(([pl, n]) => `<div class="spot-row"><span>${esc(pl)}</span>
+      <div class="stepper big"><button type="button" data-spot-step="-1" data-place="${esc(pl)}" aria-label="One less">−</button><input type="number" inputmode="decimal" min="0" step="any" data-spot="${esc(pl)}" value="${n}" aria-label="How many in ${esc(pl)}"><button type="button" data-spot-step="1" data-place="${esc(pl)}" aria-label="One more">+</button></div>
+      <button type="button" class="remove" data-spot-del="${esc(pl)}" aria-label="Not kept in ${esc(pl)}"><svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17"/></svg></button></div>`)
+    .join('');
+  const free = allLocations().filter((pl) => pl !== main && !(pl in spots));
+  return `${rows ? `<span class="label">Also kept in</span>${rows}` : ''}
+    ${free.length ? `<select class="add-spot" data-add-spot aria-label="Also kept in another place"><option value="">+ Also kept in another place…</option>${free.map((pl) => `<option>${esc(pl)}</option>`).join('')}</select>` : ''}`;
+}
+
+function syncSpots(form) {
+  form.querySelectorAll('[data-spot]').forEach((i) => (ui.editor.spots[i.dataset.spot] = Math.max(0, parseFloat(i.value) || 0)));
+}
+
+const redrawSpots = (form) => ($('#spots', form).innerHTML = spotsHtml(form.location.value));
+
+const LEVELS = [['', 'Full'], ['0.75', '¾'], ['0.5', '½'], ['0.25', '¼'], ['0.1', 'Almost empty']];
+
 function renderEditor() {
   const { item, isNew, hint, similar, fromScan } = ui.editor;
+  ui.editor.spots ??= { ...(item.spots || {}) };
   const lowOpts = [['', 'Never'], ...[0, 1, 2, 3, 5, 10].map((n) => [n, n === 0 ? 'When out' : `${n} left`])];
+  // A part-used package shows as a whole count plus how much is left in the open one.
+  const main = countAt(item, item.location);
+  const frac = round(main % 1);
+  const count = frac ? Math.ceil(main) : main;
+  const level = frac ? LEVELS.slice(1).reduce((best, l) => (Math.abs(l[0] - frac) < Math.abs(best[0] - frac) ? l : best))[0] : '';
+  const today = todayIso();
+  const usual = item.shelfLife || suggestShelfLife(item.name, item.location);
   return `<form class="form editor" id="editForm" novalidate>
     <div class="page-head">
       <button type="button" class="link" data-edit="cancel">${fromScan && isNew ? 'Skip' : 'Cancel'}</button>
@@ -752,7 +948,7 @@ function renderEditor() {
     <label>Name<input name="name" value="${esc(item.name)}" placeholder="What is it?" autocomplete="off" enterkeyhint="done"></label>
     <div class="row2">
       <label>How many
-        <div class="stepper big"><button type="button" data-step="-1" aria-label="One less">−</button><input name="qty" type="number" inputmode="decimal" step="any" min="0" value="${item.qty}" aria-label="Quantity"><button type="button" data-step="1" aria-label="One more">+</button></div>
+        <div class="stepper big"><button type="button" data-step="-1" aria-label="One less">−</button><input name="qty" type="number" inputmode="decimal" step="any" min="0" value="${count}" aria-label="Quantity"><button type="button" data-step="1" aria-label="One more">+</button></div>
       </label>
       <label>Counted in ${unitPicker(item.unit)}</label>
     </div>
@@ -760,7 +956,25 @@ function renderEditor() {
       <label>Kept in ${locationPicker(item.location)}</label>
       <label>Buy at ${storePicker(item.store || '')}</label>
     </div>
+    <div id="spots">${spotsHtml(item.location)}</div>
+    <div class="row2">
+      <label>Opened
+        <select name="opened">
+          <option value="">Not opened</option>
+          <option value="${today}" ${item.opened === today ? 'selected' : ''}>Opened today</option>
+          ${item.opened && item.opened !== today ? `<option value="${item.opened}" selected>Opened ${new Date(item.opened + 'T00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</option>` : ''}
+        </select>
+      </label>
+      <label>Left in the open one
+        <select name="level">${LEVELS.map(([v, t]) => `<option value="${v}" ${v === level ? 'selected' : ''}>${t}</option>`).join('')}</select>
+      </label>
+    </div>
     <label>Use by <span style="font-weight:400">(optional)</span><input name="useBy" type="date" value="${esc(item.useBy || '')}"></label>
+    <div class="quick-dates">
+      ${[[3, '+3 days'], [7, '1 week'], [14, '2 weeks'], [30, '1 month']].map(([d, t]) => `<button type="button" data-days="${d}">${t}</button>`).join('')}
+      ${usual ? `<button type="button" data-days="${usual}" class="usual">Usually ${usual} days</button>` : ''}
+      <button type="button" data-days="clear">Clear</button>
+    </div>
     <details><summary>Shopping & scanning</summary>
       <div class="row2">
         <label>Add to list at
@@ -786,6 +1000,21 @@ $('#main').addEventListener('click', (e) => {
   const act = e.target.closest('[data-edit]')?.dataset.edit;
   if (act === 'cancel') closeEditor(null);
   if (act === 'link') linkScannedTo(byId(e.target.closest('[data-id]').dataset.id));
+  const days = e.target.closest('[data-days]')?.dataset.days;
+  if (days) form.useBy.value = days === 'clear' ? '' : dateIn(Number(days));
+  const spotStep = e.target.closest('[data-spot-step]');
+  if (spotStep) {
+    syncSpots(form);
+    const pl = spotStep.dataset.place;
+    ui.editor.spots[pl] = Math.max(0, round(ui.editor.spots[pl] + Number(spotStep.dataset.spotStep)));
+    redrawSpots(form);
+  }
+  const spotDel = e.target.closest('[data-spot-del]')?.dataset.spotDel;
+  if (spotDel) {
+    syncSpots(form);
+    delete ui.editor.spots[spotDel];
+    redrawSpots(form);
+  }
   // The new photo is kept aside until Save, so Cancel throws it away.
   if (act === 'photo') {
     pickPhoto().then(async (file) => {
@@ -809,6 +1038,26 @@ $('#main').addEventListener('click', (e) => {
   }
 });
 
+$('#main').addEventListener('change', (e) => {
+  const form = e.target.closest('#editForm');
+  if (!form || !ui.editor) return;
+  if (e.target.matches('[data-add-spot]') && e.target.value) {
+    syncSpots(form);
+    ui.editor.spots[e.target.value] = 1;
+    redrawSpots(form);
+  }
+  // Making another place the main one folds its count into the main count.
+  if (e.target.name === 'location' && e.target.value !== '__new') {
+    syncSpots(form);
+    const pl = e.target.value;
+    if (pl in ui.editor.spots) {
+      form.qty.value = round((parseFloat(form.qty.value) || 0) + ui.editor.spots[pl]);
+      delete ui.editor.spots[pl];
+    }
+    redrawSpots(form);
+  }
+});
+
 $('#main').addEventListener('input', (e) => {
   const form = e.target.closest('#editForm');
   if (form && ['name', 'location'].includes(e.target.name) && ui.editor && ui.editor.photo === undefined && !ui.editor.item.image) showEditorPhoto(form);
@@ -827,13 +1076,18 @@ $('#main').addEventListener('submit', (e) => {
   }
   checkpoint();
   const qtyBefore = item.qty;
+  const { opened: openedBefore, useBy: useByBefore } = item;
+  syncSpots(form);
+  const count = Math.max(0, parseFloat(form.qty.value) || 0);
+  const level = parseFloat(form.level.value) || 0;
+  const main = level ? round(Math.max(0, Math.ceil(count) - 1) + level) : count;
+  const spots = Object.fromEntries(Object.entries(ui.editor.spots).filter(([pl, n]) => n > 0 && pl !== form.location.value));
   Object.assign(item, {
     name: sentenceCase(name),
-    qty: Math.max(0, parseFloat(form.qty.value) || 0),
+    qty: round(main + Object.values(spots).reduce((a, b) => a + b, 0)),
     unit: singularUnit(form.unit.value),
     location: form.location.value,
     store: form.store.value,
-    useBy: form.useBy.value,
     low: form.low.value === '' ? null : Number(form.low.value),
     scanQty: Math.max(1, parseInt(form.scanQty.value, 10) || 1),
     brand: form.brand.value.trim(),
@@ -841,6 +1095,19 @@ $('#main').addEventListener('submit', (e) => {
     updated: Date.now(),
   });
   if (ui.editor.photo !== undefined) item.image = ui.editor.photo;
+  if (Object.keys(spots).length) item.spots = spots;
+  else delete item.spots;
+  if (form.useBy.value !== (useByBefore || '')) {
+    if (form.useBy.value) setUseBy(item, form.useBy.value);
+    else {
+      item.useBy = '';
+      item.noUseBy = true; // cleared on purpose: don't fill it in again on the next purchase
+    }
+  }
+  if (!form.opened.value) delete item.opened;
+  else if (form.opened.value !== openedBefore) markOpened(item, form.opened.value);
+  for (const pl of placesOf(item)) if (!prefs.places.includes(pl)) prefs.places.push(pl);
+  savePrefs();
   // Restocking clears a list request; just editing other details doesn't.
   if (item.qty > qtyBefore && item.qty > (item.low ?? -1)) item.need = false;
   if (item.store && !prefs.stores.includes(item.store)) {
@@ -859,7 +1126,10 @@ function openMenu() {
     <div class="sheet-head"><h2>Options</h2><button class="link" data-close>Done</button></div>
     <div class="menu">
       <button data-menu="add">Add an item by hand</button>
+      <button data-menu="paste">Paste a list</button>
+      <button data-menu="places">Places</button>
       <button data-menu="stores">Stores</button>
+      <button data-menu="badge">Use-soon count on app icon: ${prefs.badge ? 'On' : 'Off'}</button>
       <button data-menu="recipe">Copy kitchen list for recipe ideas</button>
       <button data-menu="sound">Scan beep: ${prefs.sound ? 'On' : 'Off'}</button>
       <button data-menu="export">Back up to a file</button>
@@ -883,6 +1153,186 @@ async function shareText(text, title) {
     prompt('Copy this:', text);
   }
 }
+
+// iPhone shows a home-screen icon count only for apps allowed to send notifications.
+async function toggleBadge(button) {
+  if (prefs.badge) {
+    prefs.badge = false;
+    navigator.clearAppBadge?.().catch(() => {});
+  } else {
+    if (!('setAppBadge' in navigator)) return toast('Add Key Record to your Home Screen first (Share → Add to Home Screen), then turn this on from there.');
+    const allowed = window.Notification ? await Notification.requestPermission() : 'granted';
+    if (allowed !== 'granted') return toast('The iPhone only shows the count when notifications are allowed for Key Record.');
+    prefs.badge = true;
+  }
+  savePrefs();
+  updateBadge();
+  button.textContent = `Use-soon count on app icon: ${prefs.badge ? 'On' : 'Off'}`;
+}
+
+function openPlaces() {
+  const places = allLocations();
+  const count = (pl) => state.items.filter((i) => placesOf(i).includes(pl)).length;
+  openSheet(`
+    <div class="sheet-head"><h2>Places</h2><button class="link" data-close>Done</button></div>
+    <p class="note">Where things are kept. Add spots like “Garage shelf 2”, tap a name to rename it, and use the arrows to change the order.</p>
+    <ul class="list" style="margin-top:12px">${places
+      .map((pl, i) => `<li class="item place-row">
+        <button class="info" data-place-rename="${esc(pl)}"><div class="name">${esc(pl)}</div><div class="meta">${count(pl)} item${count(pl) === 1 ? '' : 's'}</div></button>
+        <button class="icon-btn" data-place-move="-1" data-place="${esc(pl)}" ${i === 0 ? 'disabled' : ''} aria-label="Move ${esc(pl)} up">↑</button>
+        <button class="icon-btn" data-place-move="1" data-place="${esc(pl)}" ${i === places.length - 1 ? 'disabled' : ''} aria-label="Move ${esc(pl)} down">↓</button>
+        <button class="remove" data-place-del="${esc(pl)}" aria-label="Remove ${esc(pl)}"><svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17"/></svg></button>
+      </li>`)
+      .join('')}</ul>
+    <button class="add-row" data-place-add>+ Add a place</button>`);
+}
+
+// Renaming into an existing place merges the two.
+function renamePlace(from, to) {
+  for (const it of state.items) {
+    if (it.location === from) it.location = to;
+    if (it.spots && from in it.spots) {
+      it.spots[to] = round((it.spots[to] || 0) + it.spots[from]);
+      delete it.spots[from];
+    }
+  }
+  prefs.places = [...new Set(allLocations().map((pl) => (pl === from ? to : pl)))];
+}
+
+function placeAction(e) {
+  const t = (k) => e.target.closest(`[${k}]`);
+  if (t('data-place-add')) {
+    const name = sentenceCase(prompt('Name the new place (e.g. Basement, Garage shelf 2)')?.trim() || '');
+    if (name && !allLocations().includes(name)) {
+      prefs.places = [...allLocations(), name];
+      savePrefs();
+    }
+    return openPlaces();
+  }
+  const rename = t('data-place-rename')?.dataset.placeRename;
+  if (rename) {
+    const to = sentenceCase(prompt(`Rename “${rename}” to:`, rename)?.trim() || '');
+    if (!to || to === rename) return;
+    if (allLocations().includes(to) && !confirm(`${to} already exists. Put everything from ${rename} there?`)) return;
+    checkpoint();
+    renamePlace(rename, to);
+  }
+  const move = t('data-place-move');
+  if (move) {
+    const places = allLocations();
+    const i = places.indexOf(move.dataset.place);
+    const j = i + Number(move.dataset.placeMove);
+    [places[i], places[j]] = [places[j], places[i]];
+    prefs.places = places;
+  }
+  const del = t('data-place-del')?.dataset.placeDel;
+  if (del) {
+    const others = allLocations().filter((pl) => pl !== del);
+    if (!others.length) return toast('Keep at least one place.');
+    const n = state.items.filter((i) => placesOf(i).includes(del)).length;
+    if (n && !confirm(`Move the ${n} item${n === 1 ? '' : 's'} in ${del} to ${others[0]}?`)) return;
+    checkpoint();
+    renamePlace(del, others[0]);
+    prefs.places = prefs.places.filter((pl) => pl !== del);
+  }
+  savePrefs();
+  save();
+  openPlaces();
+}
+
+// Paste a list: Notes, a text, or receipt text copied with Live Text → many items at once.
+function openPaste() {
+  ui.paste = { target: ui.view === 'shop' ? 'list' : 'stock' };
+  render();
+  scrollTo(0, 0);
+}
+
+function closePaste() {
+  ui.paste = null;
+  render();
+}
+
+function renderPaste() {
+  return `<form class="form editor" id="pasteForm" novalidate>
+    <div class="page-head">
+      <button type="button" class="link" data-paste="cancel">Cancel</button>
+      <h2>Paste a list</h2>
+      <button type="submit" class="link strong">Add</button>
+    </div>
+    <p class="note" style="margin-top:14px">One thing per line, like “2 cans of tomatoes”. Lists from Notes or texts work, and so do receipts: open a photo of the receipt, press and hold its text, tap Select All, then Copy, and paste it here.</p>
+    <label>Add to
+      <select name="target">
+        <option value="stock" ${ui.paste.target === 'stock' ? 'selected' : ''}>My stock — I have these</option>
+        <option value="list" ${ui.paste.target === 'list' ? 'selected' : ''}>Shopping list — I need these</option>
+      </select>
+    </label>
+    <label>List<textarea name="text" rows="6" placeholder="Milk&#10;2 cans of tomatoes&#10;Paper towels"></textarea></label>
+    <div id="pastePreview"></div>
+    <button class="primary" type="submit">Add items</button>
+  </form>`;
+}
+
+function showPastePreview(form) {
+  const rows = parseListLines(form.text.value);
+  $('#pastePreview', form).innerHTML = rows.length
+    ? `<span class="label">${rows.length} item${rows.length === 1 ? '' : 's'} — fix any names before adding</span>
+      ${rows.map((r) => `<div class="paste-row">
+        <input name="pq" type="number" inputmode="decimal" min="0" step="any" value="${r.qty}" aria-label="How many">
+        <input name="pn" value="${esc(sentenceCase(r.name))}" data-unit="${esc(r.unit)}" aria-label="Name" autocomplete="off">
+        <button type="button" class="remove" data-paste-drop aria-label="Leave this one out"><svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17"/></svg></button>
+      </div>`).join('')}`
+    : '';
+}
+
+function addPasted(form) {
+  const rows = [...form.querySelectorAll('.paste-row')].map((r) => ({
+    name: r.querySelector('[name=pn]').value.trim(),
+    qty: Math.max(0, parseFloat(r.querySelector('[name=pq]').value) || 1),
+    unit: r.querySelector('[name=pn]').dataset.unit || '',
+  })).filter((r) => r.name);
+  if (!rows.length) return form.text.focus();
+  const toList = form.target.value === 'list';
+  checkpoint();
+  for (const { name, qty, unit } of rows) {
+    // The list uses your exact words; stock finds what you already have, like voice does.
+    let it = (toList ? matchExact(name, state.items) : matchItem(name, state.items))?.item;
+    if (!it) {
+      it = newItem({ name: sentenceCase(name), qty: 0, unit, location: guessLocation(name), listOnly: toList });
+      state.items.push(it);
+    }
+    if (toList) {
+      it.need = true;
+      ui.bought.delete(it.id);
+      revealOnList(it);
+    } else {
+      const qtyBefore = it.qty;
+      it.qty = round(it.qty + qty);
+      it.need = false;
+      if (unit && !it.unit) it.unit = unit;
+      freshUseBy(it, qtyBefore);
+    }
+    it.updated = Date.now();
+  }
+  ui.paste = null;
+  ui.view = toList ? 'shop' : 'stock';
+  save();
+  scrollTo(0, 0);
+  toast(`Added ${rows.length} item${rows.length === 1 ? '' : 's'} to ${toList ? 'the shopping list' : 'your stock'}`, { undo: true });
+}
+
+$('#main').addEventListener('input', (e) => {
+  if (e.target.name === 'text' && e.target.closest('#pasteForm')) showPastePreview(e.target.form);
+});
+$('#main').addEventListener('click', (e) => {
+  if (!e.target.closest('#pasteForm')) return;
+  if (e.target.closest('[data-paste="cancel"]')) closePaste();
+  e.target.closest('[data-paste-drop]')?.closest('.paste-row').remove();
+});
+$('#main').addEventListener('submit', (e) => {
+  if (e.target.id !== 'pasteForm') return;
+  e.preventDefault();
+  addPasted(e.target);
+});
 
 function openStores() {
   const count = (st) => state.items.filter((i) => i.store === st).length;
@@ -952,13 +1402,13 @@ function loadSample() {
   const inDays = (n) => new Date(Date.now() + n * 864e5).toISOString().slice(0, 10);
   const s = (name, qty, unit, location, extra = {}) => newItem({ name, qty, unit, location, ...extra });
   state.items.push(
-    s('Paper towels', 6, 'roll', 'Pantry', { brand: 'Bounty', scanQty: 6, low: 2, store: 'Costco' }),
+    s('Paper towels', 18, 'roll', 'Pantry', { brand: 'Bounty', scanQty: 6, low: 2, store: 'Costco', spots: { Garage: 12 } }),
     s('Diced tomatoes', 4, 'can', 'Pantry'),
     s('Spaghetti', 2, 'box', 'Pantry'),
     s('Black beans', 3, 'can', 'Pantry'),
     s('Olive oil', 1, 'bottle', 'Pantry', { low: 1, store: 'Aldi' }),
     s('Rice', 1, 'bag', 'Pantry', { low: 0 }),
-    s('Milk', 1, 'gallon', 'Fridge', { low: 1, useBy: inDays(3), store: 'Aldi' }),
+    s('Milk', 1, 'gallon', 'Fridge', { low: 1, useBy: inDays(3), store: 'Aldi', opened: inDays(-1) }),
     s('Eggs', 12, '', 'Fridge', { scanQty: 12, low: 4, useBy: inDays(12), store: 'Aldi' }),
     s('Cheddar cheese', 1, 'block', 'Fridge', { low: 0 }),
     s('Spinach', 1, 'bag', 'Fridge', { low: 0, useBy: inDays(1) }),
@@ -996,7 +1446,7 @@ function openVoice() {
         <button type="button">Removing a roll of paper towels</button><button type="button">Used 2 cans of tomatoes and a box of spaghetti</button>
         <button type="button">Bought a dozen eggs</button><button type="button">We're out of milk</button>
         <button type="button">How many rolls of toilet paper do we have?</button><button type="button">We have 3 rolls of duct tape</button>
-        <button type="button">Add coffee to the shopping list</button><button type="button">Take coffee off the list</button><button type="button">Add eggs to the Costco list</button><button type="button">Move tomatoes from the list to the pantry</button>
+        <button type="button">Add coffee to the shopping list</button><button type="button">Take coffee off the list</button><button type="button">Add eggs to the Costco list</button><button type="button">Move tomatoes from the list to the pantry</button><button type="button">Milk expires Friday</button><button type="button">Opened the salsa</button><button type="button">Half a bottle of olive oil left</button><button type="button">Put 6 rolls of paper towels in the garage</button>
       </div>
     </div>`, () => {
     stopListening();
@@ -1420,7 +1870,9 @@ async function handleCode(code) {
   checkpoint();
   let delta;
   if (prefs.scanMode === 'add') {
+    const qtyBefore = item.qty;
     item.qty = round(item.qty + (item.scanQty || 1));
+    freshUseBy(item, qtyBefore);
     item.need = false;
     delta = `+${fmt(item.scanQty || 1)} added`;
   } else {
@@ -1548,7 +2000,9 @@ function linkScannedTo(existing) {
   }
   let note = 'Barcode linked';
   if (prefs.scanMode === 'add') {
+    const qtyBefore = existing.qty;
     existing.qty = round(existing.qty + (existing.scanQty || 1));
+    freshUseBy(existing, qtyBefore);
     existing.need = false;
     note = `+${fmt(existing.scanQty || 1)} added · barcode linked`;
   } else if (prefs.scanMode === 'use') {
@@ -1647,8 +2101,9 @@ $('#main').addEventListener('click', (e) => {
   if (!btn || Date.now() - lastSwipeAt < 400) return;
   const item = byId(btn.closest('[data-id]')?.dataset.id);
   switch (btn.dataset.act) {
-    case 'inc': return bump(item, 1);
-    case 'dec': return bump(item, -1);
+    case 'inc': return bump(item, 1, btn.dataset.place || null);
+    case 'dec': return bump(item, -1, btn.dataset.place || null);
+    case 'paste': return openPaste();
     case 'edit': return openEditor(item);
     case 'got': return markBought(item);
     case 'unlist': return removeFromList(item);
@@ -1873,6 +2328,7 @@ $('#sheet').addEventListener('click', (e) => {
     else navigator.clipboard?.writeText(text).then(() => toast('Copied — paste it into any note'), () => prompt('Copy this:', text));
     return;
   }
+  if (e.target.closest('[data-place-add], [data-place-rename], [data-place-move], [data-place-del]')) return placeAction(e);
   if (e.target.closest('[data-store-add]')) {
     const name = titleCase(prompt('Store name (e.g. Costco, Aldi)') || '');
     if (name && !allStores().includes(name)) {
@@ -1901,9 +2357,12 @@ $('#sheet').addEventListener('click', (e) => {
     e.target.closest('[data-menu]').textContent = `Scan beep: ${prefs.sound ? 'On' : 'Off'}`;
     return;
   }
+  if (m === 'badge') return toggleBadge(e.target.closest('[data-menu]'));
   closeSheet();
   if (m === 'add') openEditor(newItem({ qty: 1 }), { isNew: true });
   if (m === 'stores') openStores();
+  if (m === 'places') openPlaces();
+  if (m === 'paste') openPaste();
   if (m === 'recipe') shareKitchen();
   if (m === 'export') exportBackup();
   if (m === 'import') $('#importFile').click();

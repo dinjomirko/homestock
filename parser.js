@@ -31,6 +31,8 @@ const ACTION_PHRASES = {
   ],
   // Bought something on the list: off the list and into stock (like ticking it off).
   restock: ['move', 'moving', 'moved', 'mark', 'mark off', 'check off', 'tick off'],
+  // Opening a package doesn't use it up; it starts the clock on using it.
+  open: ['opened', 'open', 'opening', 'just opened', 'cracked open', 'broke open'],
   unlist: [
     "don't need", 'dont need', 'do not need', 'no longer need', "don't need any", 'cross off', 'cross',
     'scratch off', 'scratch',
@@ -43,7 +45,7 @@ const ACTION_PHRASES = {
     'took out', 'take out', 'taking out', 'threw out', 'throw out', 'threw away', 'throw away',
     'tossed', 'toss', 'removing', 'removed', 'remove', 'subtracting', 'subtract', 'minus',
     'using', 'used', 'use', 'took', 'take', 'taking', 'ate', 'eaten', 'eat', 'eating',
-    'drank', 'drink', 'opened', 'open', 'opening', 'grabbed', 'grab', 'grabbing', 'consumed',
+    'drank', 'drink', 'grabbed', 'grab', 'grabbing', 'consumed',
     'finished', 'pulled', 'pull', 'gave away', 'cooked with', 'baked with', 'have used',
     'have been using', 'had', 'delete', 'deleting',
   ],
@@ -114,6 +116,8 @@ export function parseCommand(text, opts = {}) {
 
   const query = parseQuery(clean, ctx);
   if (query) return [query];
+  const special = parseExpiry(clean, opts.today || new Date()) || parseLevel(clean);
+  if (special) return [special];
 
   // Split into clauses on commas/"then", and on "and" only when what follows starts a new
   // command ("…tomatoes and a box of pasta"), so "salt and pepper" stays one item.
@@ -293,6 +297,157 @@ function parseClause(clause, prevAction, ctx = {}) {
   return { action, qty, unit, name, location, ...(store ? { store } : {}) };
 }
 
+// ---------- Dates, use-by and how much is left ----------
+
+const MONTHS = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+export const isoDate = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const addDays = (d, n) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
+// A month after Oct 31 is Nov 30, not Dec 1.
+const addMonths = (d, n) => new Date(d.getFullYear(), d.getMonth() + n, Math.min(d.getDate(), new Date(d.getFullYear(), d.getMonth() + n + 1, 0).getDate()));
+
+// "friday", "tomorrow", "in 5 days", "a week", "november 20th", "the 12th", "11/20" → "2026-11-20"
+export function parseDate(text, today = new Date()) {
+  const t = String(text).toLowerCase()
+    .replace(/(\d+)(?:st|nd|rd|th)\b/g, '$1')
+    .replace(/[,.]/g, ' ')
+    .replace(/\b(?:on|the|of|this|coming|from now)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const base = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  if (/^(?:today|tonight)$/.test(t)) return isoDate(base);
+  if (t === 'tomorrow') return isoDate(addDays(base, 1));
+  if (t === 'next week') return isoDate(addDays(base, 7));
+  if (t === 'next month') return isoDate(addMonths(base, 1));
+  let m = t.match(/^(?:in )?(\S+) (day|week|month)s?$/);
+  if (m && numOf(m[1]) !== null) {
+    const n = Math.round(numOf(m[1]));
+    return isoDate(m[2] === 'month' ? addMonths(base, n) : addDays(base, n * (m[2] === 'week' ? 7 : 1)));
+  }
+  m = t.match(/^(?:next )?([a-z]+)$/);
+  if (m && WEEKDAYS.includes(m[1])) return isoDate(addDays(base, (WEEKDAYS.indexOf(m[1]) - base.getDay() + 7) % 7 || 7));
+  m = t.match(/^([a-z]{3,}) (\d{1,2})$/) || t.match(/^(\d{1,2}) ([a-z]{3,})$/);
+  if (m) {
+    const [word, day] = /^\d/.test(m[1]) ? [m[2], +m[1]] : [m[1], +m[2]];
+    const month = MONTHS.findIndex((mo) => mo.startsWith(word.slice(0, 3)) && mo.startsWith(word));
+    if (month >= 0 && day >= 1 && day <= 31) {
+      let d = new Date(base.getFullYear(), month, day);
+      if (d < base) d = new Date(base.getFullYear() + 1, month, day);
+      return isoDate(d);
+    }
+  }
+  m = t.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/);
+  if (m) {
+    let year = m[3] ? +m[3] + (m[3].length === 2 ? 2000 : 0) : base.getFullYear();
+    let d = new Date(year, +m[1] - 1, +m[2]);
+    if (!m[3] && d < base) d = new Date(year + 1, +m[1] - 1, +m[2]);
+    return isoDate(d);
+  }
+  m = t.match(/^(\d{1,2})$/);
+  if (m && +m[1] >= 1 && +m[1] <= 31) {
+    let d = new Date(base.getFullYear(), base.getMonth(), +m[1]);
+    if (d < base) d = new Date(base.getFullYear(), base.getMonth() + 1, +m[1]);
+    return isoDate(d);
+  }
+  return null;
+}
+
+// "milk expires friday", "use the spinach by tomorrow", "eggs are good until the 20th"
+const EXPIRY_PATTERNS = [
+  /^(.+?)\s+(?:expires?|expiring|will expire|goes bad|go bad|is good until|are good until|is good till|are good till|good until|good till|is good|are good|lasts until|is fresh until)\s+(.+)$/,
+  /^(?:use|eat|finish|drink)\s+(?:up\s+)?(.+?)\s+by\s+(.+)$/,
+  /^(?:set\s+)?(?:the\s+)?(?:use by|expiration|expiry)(?:\s+date)?\s+(?:for|of|on)\s+(.+?)\s+(?:to|as)\s+(.+)$/,
+];
+
+function parseExpiry(clean, today) {
+  for (const re of EXPIRY_PATTERNS) {
+    const m = clean.match(re);
+    if (!m) continue;
+    const useBy = parseDate(m[2].replace(/^(?:on|by|until|till)\s+/, ''), today);
+    if (!useBy) continue;
+    const name = m[1].replace(/^(?:the|my|our|a|an)\s+/, '').trim();
+    if (name) return { action: 'expiry', qty: null, unit: null, name, location: null, useBy };
+  }
+  return null;
+}
+
+// "half a bottle of olive oil left", "a little milk left", "the shampoo is almost empty"
+const LEVEL_WORDS = { half: 0.5, 'a half': 0.5, quarter: 0.25, 'a quarter': 0.25, 'three quarters': 0.75, 'a third': 0.33, 'two thirds': 0.67, 'a little': 0.1, 'a bit': 0.1, 'very little': 0.1, 'almost nothing': 0.1, 'barely any': 0.1 };
+const LEVEL_LEFT = new RegExp(`^(?:there'?s|theres|there is|we have|i have|we've got|weve got|got|only)?\\s*(${Object.keys(LEVEL_WORDS).sort((a, b) => b.length - a.length).join('|')})\\s+(?:(?:a|an|one)\\s+)?(?:([a-z]+)\\s+of\\s+|of\\s+)?(?:the\\s+|my\\s+|our\\s+)?(.+?)\\s+left$`);
+const LEVEL_STATE = /^(?:the\s+|my\s+|our\s+)?(.+?)\s+(?:is|are|'s|s)\s+(half|a quarter|quarter|three quarters|almost|nearly)\s+(full|empty|gone|used up|used|left|done)$/;
+
+function parseLevel(clean) {
+  let m = clean.match(LEVEL_LEFT);
+  if (m && m[3]) return { action: 'level', qty: null, unit: m[2] && UNITS.has(stem(m[2])) ? stem(m[2]) : null, name: m[3], location: null, level: LEVEL_WORDS[m[1]] };
+  m = clean.match(LEVEL_STATE);
+  if (m) {
+    const full = /^(full|left)$/.test(m[3]);
+    const v = /^(almost|nearly)$/.test(m[2]) ? (full ? 0.9 : 0.1) : LEVEL_WORDS[m[2]];
+    return { action: 'level', qty: null, unit: null, name: m[1], location: null, level: full || /^(almost|nearly)$/.test(m[2]) ? v : round2(1 - v) };
+  }
+  return null;
+}
+const round2 = (n) => Math.round(n * 100) / 100;
+
+// Typical days fresh food stays good after buying, and after opening a package.
+const SHELF_LIFE = [
+  [/\b(heavy cream|whipping cream|sour cream|cream cheese)\b/, 14], [/\b(milk|half and half|creamer)\b/, 7], [/\byogh?urt\b/, 14],
+  [/\beggs?\b/, 28], [/\b(cheese|cheddar|parmesan|swiss|provolone|mozzarella)\b/, 21], [/\bbutter\b/, 30],
+  [/\b(bread|bagels?|buns?|english muffins?)\b/, 6], [/\btortillas?\b/, 14],
+  [/\b(lettuce|spinach|kale|greens|salad|arugula|cilantro|parsley|herbs)\b/, 5], [/\b(berries|strawberr(y|ies)|blueberr(y|ies)|raspberr(y|ies))\b/, 4],
+  [/\bbananas?\b/, 5], [/\bavocados?\b/, 4], [/\bmushrooms?\b/, 5],
+  [/\b(ground beef|ground turkey|chicken|turkey|fish|salmon|shrimp)\b/, 2], [/\b(beef|pork|steak|lamb)\b/, 3],
+  [/\b(bacon|ham|hot dogs?|deli|lunch meat|salami)\b/, 7], [/\b(hummus|salsa|guacamole|tofu)\b/, 7], [/\bjuice\b/, 10],
+];
+const NOT_FRESH = /\b(canned|cans?|dried|frozen|diced|crushed|paste|powder|mix|chips|shelf stable|evaporated|condensed)\b/;
+
+export function suggestShelfLife(name, location = '') {
+  const t = String(name || '').toLowerCase();
+  if (NOT_FRESH.test(t) || location === 'Freezer') return null;
+  for (const [re, days] of SHELF_LIFE) if (re.test(t)) return days;
+  return null;
+}
+
+const OPEN_LIFE = [
+  [/\b(sour cream|cream cheese)\b/, 14], [/\b(milk|half and half|creamer|cream)\b/, 7], [/\bjuice\b/, 7], [/\byogh?urt\b/, 5],
+  [/\b(salsa|hummus|guacamole|pesto)\b/, 7], [/\b(marinara|pasta sauce|tomato sauce|sauce)\b/, 5], [/\b(broth|stock)\b/, 4],
+  [/\bwine\b/, 3], [/\bcoconut milk\b/, 4], [/\b(jam|jelly)\b/, 30], [/\b(mayo|mayonnaise|pickles?)\b/, 60], [/\bketchup\b/, 180],
+];
+
+export function openLife(name) {
+  const t = String(name || '').toLowerCase();
+  for (const [re, days] of OPEN_LIFE) if (re.test(t)) return days;
+  return null;
+}
+
+// ---------- Pasted lists ----------
+
+const RECEIPT_NOISE = /\b(sub ?total|total|tax|balance|change due|cash|visa|mastercard|amex|debit|credit|card #|savings|you saved|coupon|discount|thank you|receipt|store #|tel|phone|items sold|approval|auth code)\b/;
+
+// One item per line from Notes, a text, or receipt text copied with Live Text.
+export function parseListLines(text) {
+  const out = [];
+  for (const raw of String(text || '').split(/\r?\n|;/)) {
+    let line = raw
+      .replace(/^[\s\-–*•◦▪▢☐☑✓✔□○●>]+/, '')
+      .replace(/^\[[ xX]?\]\s*/, '')
+      .trim();
+    if (!line || RECEIPT_NOISE.test(line.toLowerCase())) continue;
+    line = line
+      .replace(/\s+-?\$?\d+[.,]\d{2}\s*[A-Za-z]{0,2}$/, '') // trailing price, e.g. "3.49 F"
+      .replace(/^\d{5,}\s+/, '') // leading item code
+      .replace(/\s+\d{5,}$/, '')
+      .replace(/^(\d+)\s*[x×]\s*/i, '$1 ') // "2x milk"
+      .replace(/^(.+?)\s+[x×]\s*(\d+)$/i, '$2 $1') // "milk x2"
+      .replace(/,/g, ' ')
+      .trim();
+    if (!/[a-z]/i.test(line)) continue;
+    const a = parseCommand(`add ${line}`)[0];
+    if (a?.name) out.push({ name: a.name, qty: a.qty ?? 1, unit: a.unit || '' });
+  }
+  return out;
+}
+
 // ---------- Matching names to items ----------
 
 const STOP = new Set(['the', 'a', 'an', 'of', 'and', 'with', 'for', 'in', 'my', 'our', 'some', 'to']);
@@ -359,7 +514,7 @@ export function matchExact(query, items) {
 export function resolveActions(actions, items) {
   const out = [];
   for (const a of actions) {
-    const prefer = a.action === 'remove' || a.action === 'out';
+    const prefer = ['remove', 'out', 'open', 'level', 'expiry'].includes(a.action);
     const find = (name) =>
       a.action === 'need' ? matchExact(name, items)
       : a.action === 'unlist' || a.action === 'restock' ? matchExact(name, items) || matchItem(name, items)

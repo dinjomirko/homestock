@@ -465,3 +465,31 @@ h2.group { color: var(--gold); font-weight: 500; letter-spacing: .2em; }
   .badge { color: var(--accent-ink); }
 }
 body { font-variant-numeric: lining-nums; }
+
+/* Quick use-by buttons */
+.quick-dates { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.quick-dates button { border: 1px solid var(--line); background: var(--card); border-radius: 999px; min-height: 36px; padding: 4px 12px; font: 500 13px var(--caps); letter-spacing: .04em; color: var(--ink); }
+.quick-dates .usual { border-color: var(--gold); color: var(--gold); }
+
+/* Other places an item is kept */
+.spot-row { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.spot-row > span { flex: 1; font-weight: 600; }
+.spot-row .stepper.big { width: 132px; margin: 0; flex: none; }
+.form .add-spot { margin-top: 10px; color: var(--gold); }
+
+/* Places screen */
+.place-row .icon-btn { color: var(--gold); font-size: 18px; }
+.place-row .icon-btn:disabled { opacity: .25; }
+
+/* Add / paste buttons at the end of Stock */
+.add-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.paste-link { display: block; margin: 6px 4px 0 auto; padding: 4px 0; }
+
+/* Paste a list */
+.form textarea {
+  display: block; width: 100%; margin-top: 6px; font: inherit; font-size: 16px; color: var(--ink); resize: vertical;
+  padding: 11px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--card);
+}
+.paste-row { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+.paste-row input[name="pq"] { width: 64px; flex: none; text-align: center; margin: 0; }
+.paste-row input[name="pn"] { flex: 1; margin: 0; }

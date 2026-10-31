@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseCommand, resolveActions, matchItem, guessLocation, parsePack, guessEmoji } from '../parser.js';
+import { parseCommand, resolveActions, matchItem, guessLocation, parsePack, guessEmoji, parseDate, parseListLines, suggestShelfLife, openLife } from '../parser.js';
 
 const one = (text) => {
   const r = parseCommand(text);
@@ -214,4 +214,51 @@ test('emoji placeholders', () => {
   assert.equal(guessEmoji('Mystery thing', 'Garage'), '🧰');
   assert.equal(guessEmoji('Mystery thing', 'Fridge'), '🧊');
   assert.equal(guessEmoji('Mystery thing'), '📦');
+});
+
+// Saturday, October 31, 2026
+const TODAY = new Date(2026, 9, 31);
+
+test('dates said out loud', () => {
+  for (const [said, date] of [
+    ['today', '2026-10-31'], ['tomorrow', '2026-11-01'], ['friday', '2026-11-06'], ['saturday', '2026-11-07'],
+    ['in 5 days', '2026-11-05'], ['a week', '2026-11-07'], ['2 weeks', '2026-11-14'], ['next month', '2026-11-30'],
+    ['november 20th', '2026-11-20'], ['the 12th', '2026-11-12'], ['11/20', '2026-11-20'], ['jan 3', '2027-01-03'],
+  ]) assert.equal(parseDate(said, TODAY), date, said);
+  assert.equal(parseDate('whenever', TODAY), null);
+});
+
+test('use-by by voice', () => {
+  const p = (t) => { const [a] = parseCommand(t, { today: TODAY }); return [a.action, a.name, a.useBy]; };
+  assert.deepEqual(p('milk expires friday'), ['expiry', 'milk', '2026-11-06']);
+  assert.deepEqual(p('the yogurt expires in 5 days'), ['expiry', 'yogurt', '2026-11-05']);
+  assert.deepEqual(p('use the spinach by tomorrow'), ['expiry', 'spinach', '2026-11-01']);
+  assert.deepEqual(p('eggs are good until november 20th'), ['expiry', 'eggs', '2026-11-20']);
+});
+
+test('opened and how much is left', () => {
+  assert.deepEqual([one('opened the salsa').action, one('opened the salsa').name], ['open', 'salsa']);
+  const lv = (t) => { const [a] = parseCommand(t); return [a.action, a.name, a.level]; };
+  assert.deepEqual(lv('half a bottle of olive oil left'), ['level', 'olive oil', 0.5]);
+  assert.deepEqual(lv('there is a quarter of the dish soap left'), ['level', 'dish soap', 0.25]);
+  assert.deepEqual(lv('a little milk left'), ['level', 'milk', 0.1]);
+  assert.deepEqual(lv('the shampoo is almost empty'), ['level', 'shampoo', 0.1]);
+  assert.deepEqual(lv('the olive oil is half full'), ['level', 'olive oil', 0.5]);
+  assert.deepEqual(lv('the ketchup is a quarter gone'), ['level', 'ketchup', 0.75]);
+});
+
+test('shelf life suggestions', () => {
+  assert.equal(suggestShelfLife('Milk', 'Fridge'), 7);
+  assert.equal(suggestShelfLife('Strawberries'), 4);
+  assert.equal(suggestShelfLife('Diced tomatoes', 'Pantry'), null);
+  assert.equal(suggestShelfLife('Frozen peas', 'Freezer'), null);
+  assert.equal(openLife('Salsa'), 7);
+  assert.equal(openLife('Rice'), null);
+});
+
+test('pasted lists, including receipt text', () => {
+  const r = parseListLines('- Milk\n☐ 2 cans of tomatoes\nBREAD x2\nGV MLK 2% GAL 3.49 F\nSUBTOTAL 12.34\n• paper towels\n\n4.99');
+  assert.deepEqual(r.map((i) => [i.name, i.qty, i.unit]), [
+    ['milk', 1, ''], ['tomatoes', 2, 'can'], ['bread', 2, ''], ['gv mlk 2 gal', 1, ''], ['paper towels', 1, ''],
+  ]);
 });
