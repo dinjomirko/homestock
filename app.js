@@ -17,8 +17,10 @@ const buzz = (ms = 30) => navigator.vibrate?.(ms);
 // ---------- State ----------
 
 let state = load(STORAGE_KEY, { items: [] });
-const prefs = { scanMode: 'add', sound: true, stores: ['Costco', 'Aldi', 'Target', 'Walmart'], shopStore: 'all', ...load(PREFS_KEY, {}) };
-const ui = { view: 'stock', loc: 'All', q: '', bought: new Map(), flash: null, editor: null };
+const prefs = { scanMode: 'add', sound: true, stores: ['Costco', 'Aldi', 'Target', 'Walmart'], ...load(PREFS_KEY, {}) };
+delete prefs.shopStore; // the store filter used to be remembered between launches; now it isn't
+// shopStore: the store picked at the top of the shopping list, for this visit only.
+const ui = { view: 'stock', loc: 'All', q: '', bought: new Map(), flash: null, editor: null, shopStore: 'all' };
 const undoStack = [];
 
 function load(key, fallback) {
@@ -86,7 +88,7 @@ function allStores() {
 
 // The store chosen at the top of the shopping list, or 'all'.
 function shopStore() {
-  const s = prefs.shopStore;
+  const s = ui.shopStore;
   return s && s !== 'all' && allStores().includes(s) ? s : 'all';
 }
 
@@ -157,6 +159,7 @@ function render() {
   $('#shopBadge').textContent = shopCount;
   if (ui.editor) return; // the editor page owns the screen while it's open
   $('#main').innerHTML = ui.view === 'stock' ? renderStock() : renderShop();
+  if (ui.flash) $('#main .flash')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   ui.flash = null;
 }
 
@@ -421,9 +424,19 @@ function putOnList(it) {
   checkpoint();
   it.need = true;
   it.updated = Date.now();
+  revealOnList(it);
   buzz(15);
   save();
   toast(`Added ${it.name} to the list`, { undo: true });
+}
+
+// Something just put on the list must be visible there: if the store filter would hide it,
+// show all stores. The row is highlighted and scrolled into view on the next render.
+function revealOnList(it) {
+  if (!it) return;
+  ui.flash = it.id;
+  const sel = shopStore();
+  if (sel !== 'all' && it.store && it.store !== sel) ui.shopStore = 'all';
 }
 
 function addToList(text) {
@@ -442,7 +455,7 @@ function addToList(text) {
     it.need = true;
     it.updated = Date.now();
     ui.bought.delete(it.id);
-    ui.flash = it.id;
+    revealOnList(it);
   }
   save();
 }
@@ -453,6 +466,7 @@ function applyActions(actions) {
   const done = [];
   const problems = [];
   const answers = [];
+  const listed = [];
   for (const a of actions) {
     if (!a.action) {
       problems.push(`Not sure what to do with “${a.name}”. Start with “used”, “bought”, “we have…”, or ask “how many…”`);
@@ -495,7 +509,7 @@ function applyActions(actions) {
         if (!it) create(0);
         it.need = true;
         ui.bought.delete(it.id);
-        ui.flash = it.id;
+        listed.push(it);
         // Asked for from a store's list: belongs to that store unless already tied to another.
         const sel = shopStore();
         if (!a.store && ui.view === 'shop' && sel !== 'all' && !it.store) it.store = sel;
@@ -519,6 +533,7 @@ function applyActions(actions) {
     }
     it.updated = Date.now();
   }
+  listed.forEach(revealOnList);
   if (done.length) save();
   else undoStack.pop();
   return { done, problems, answers };
@@ -1525,8 +1540,7 @@ document.addEventListener('click', (e) => {
 $('#main').addEventListener('click', (e) => {
   const storeChip = e.target.closest('[data-shop-store]');
   if (storeChip) {
-    prefs.shopStore = storeChip.dataset.shopStore;
-    savePrefs();
+    ui.shopStore = storeChip.dataset.shopStore;
     return render();
   }
   const btn = e.target.closest('[data-act]');
@@ -1763,7 +1777,7 @@ $('#sheet').addEventListener('click', (e) => {
     checkpoint();
     tagged.forEach((i) => (i.store = ''));
     prefs.stores = prefs.stores.filter((st) => st !== del);
-    if (prefs.shopStore === del) prefs.shopStore = 'all';
+    if (ui.shopStore === del) ui.shopStore = 'all';
     savePrefs();
     save();
     return openStores();
