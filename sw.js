@@ -1,6 +1,6 @@
 // Network first so updates show up right away; falls back to the cache when offline.
 // Product lookups are never cached.
-const CACHE = 'homestock-v11';
+const CACHE = 'homestock-v12';
 const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'parser.js', 'scan-worker.js', 'manifest.webmanifest', 'icon.svg', 'apple-touch-icon.png'];
 
 self.addEventListener('install', (e) => {

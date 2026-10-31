@@ -248,6 +248,8 @@ function shopRow(it, bought) {
       <button class="check" data-act="${bought ? 'unbuy' : 'got'}" role="checkbox" aria-checked="${bought}" aria-label="${esc(it.name)}">
         <svg viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></svg></button>
       <button class="info" data-act="edit"><div class="name">${esc(it.name)}</div><div class="meta">${meta}</div></button>
+      ${bought ? '' : `<button class="store-btn" data-act="pick-store" aria-label="Store for ${esc(it.name)}: ${esc(it.store || 'any store')}">
+        <span class="store-pill ${it.store ? '' : 'empty'}">${esc(it.store || '+ Store')}</span></button>`}
       ${bought ? '' : `<button class="remove" data-act="unlist" aria-label="Remove ${esc(it.name)} from the list">
         <svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17"/></svg></button>`}
     </div>
@@ -301,7 +303,10 @@ function renderShop() {
     html += `<h2 class="group"><span>In the cart · back in stock</span></h2><ul class="list shop-list">${bought.map((i) => shopRow(i, true)).join('')}</ul>
       <p class="note" style="margin:8px 4px">Tapped one by mistake? Tap it again.</p>`;
   } else if (visible.length && !prefs.swipeTipSeen) {
-    html += '<p class="note" style="margin:8px 4px">Tick things off as you shop. Swipe left or tap ✕ to take something off the list.</p>';
+    html += `<p class="note" style="margin:8px 4px">${[
+      prefs.storeTipSeen ? '' : 'Tap a store tag, or press and hold an item and drag it onto a store.',
+      prefs.swipeTipSeen ? '' : 'Swipe left or tap ✕ to take something off the list.',
+    ].filter(Boolean).join(' ') || 'Tick things off as you shop.'}</p>`;
   }
   const kitchen = state.items.filter((i) => KITCHEN.includes(i.location) && i.qty > 0).length;
   html += `<div class="card">
@@ -362,6 +367,38 @@ function removeFromList(it) {
   }
   save();
   toast(`Removed ${it.name} from the list`, { undo: true });
+}
+
+function assignStore(it, store) {
+  if (!it) return;
+  if (store === '__new') {
+    const name = prompt('Store name (e.g. Costco, Aldi)')?.trim();
+    if (!name) return;
+    store = titleCase(name);
+  }
+  if ((it.store || '') === store) return;
+  checkpoint();
+  it.store = store;
+  it.updated = Date.now();
+  if (store && !prefs.stores.includes(store)) prefs.stores.push(store);
+  prefs.storeTipSeen = true;
+  savePrefs();
+  ui.flash = it.id;
+  buzz(20);
+  save();
+  toast(`${it.name} → ${store || 'any store'}`, { undo: true });
+}
+
+function storeChoices(it, attr) {
+  return `<div class="drop-grid">${['', ...allStores()]
+    .map((st) => `<button type="button" ${attr}="${esc(st)}" class="${(it.store || '') === st ? 'current' : ''}">${esc(st || 'Any store')}</button>`)
+    .join('')}<button type="button" ${attr}="__new" class="new">+ New store</button></div>`;
+}
+
+function openStorePicker(it) {
+  openSheet(`
+    <div class="sheet-head"><h2>Where do you buy ${esc(it.name.toLowerCase())}?</h2><button class="link" data-close>Cancel</button></div>
+    <div class="picker" data-id="${it.id}">${storeChoices(it, 'data-assign-store')}</div>`);
 }
 
 function putOnList(it) {
@@ -1473,6 +1510,7 @@ $('#main').addEventListener('click', (e) => {
     case 'edit': return openEditor(item);
     case 'got': return markBought(item);
     case 'unlist': return removeFromList(item);
+    case 'pick-store': return openStorePicker(item);
     case 'unbuy': return unmarkBought(item);
     case 'add': return openEditor(newItem({ location: KITCHEN.includes(ui.loc) || DEFAULT_LOCATIONS.includes(ui.loc) ? ui.loc : 'Pantry', qty: 1 }), { isNew: true });
     case 'add-named': {
@@ -1484,6 +1522,87 @@ $('#main').addEventListener('click', (e) => {
     case 'recipe': return shareKitchen();
   }
 });
+
+// Press and hold a shopping-list row to pick it up, then drop it on a store in the tray that
+// appears at the bottom. Moving before the hold completes is a normal scroll or swipe.
+let drag = null;
+const HOLD_MS = 350;
+
+$('#main').addEventListener('pointerdown', (e) => {
+  const row = e.target.closest('.shop-list .swipe-row.swipeable');
+  if (!row || e.button > 0) return;
+  drag = { row, id: e.pointerId, x: e.clientX, y: e.clientY, active: false, timer: setTimeout(startDrag, HOLD_MS) };
+});
+
+function startDrag() {
+  if (!drag) return;
+  swipe = null;
+  const { row } = drag;
+  const item = row.querySelector('.item');
+  item.style.transform = '';
+  const rect = item.getBoundingClientRect();
+  drag.active = true;
+  drag.offX = drag.x - rect.left;
+  drag.offY = drag.y - rect.top;
+  drag.ghost = item.cloneNode(true);
+  drag.ghost.classList.add('drag-ghost');
+  drag.ghost.style.width = `${rect.width}px`;
+  document.body.append(drag.ghost);
+  moveGhost(drag.x, drag.y);
+  row.classList.add('drag-src');
+  try { row.setPointerCapture(drag.id); } catch {}
+  const tray = $('#dropTray');
+  tray.innerHTML = `<p>Drop on a store</p>${storeChoices(byId(row.dataset.id), 'data-drop-store')}`;
+  tray.hidden = false;
+  buzz(25);
+}
+
+function moveGhost(x, y) {
+  // Float the item just above the finger so the store under it stays visible.
+  drag.ghost.style.transform = `translate(${x - drag.offX}px, ${y - drag.offY - 44}px) scale(.9) rotate(-1.5deg)`;
+}
+
+const dropTargetAt = (x, y) => document.elementFromPoint(x, y)?.closest('[data-drop-store]');
+
+function endDrag() {
+  if (!drag) return;
+  clearTimeout(drag.timer);
+  drag.ghost?.remove();
+  drag.row.classList.remove('drag-src');
+  $('#dropTray').hidden = true;
+  $('#dropTray').innerHTML = '';
+  drag = null;
+}
+
+$('#main').addEventListener('pointermove', (e) => {
+  if (!drag || e.pointerId !== drag.id) return;
+  if (!drag.active) {
+    if (Math.hypot(e.clientX - drag.x, e.clientY - drag.y) > 8) endDrag();
+    return;
+  }
+  moveGhost(e.clientX, e.clientY);
+  const over = dropTargetAt(e.clientX, e.clientY);
+  document.querySelectorAll('#dropTray .over').forEach((b) => b !== over && b.classList.remove('over'));
+  over?.classList.add('over');
+});
+
+$('#main').addEventListener('pointerup', (e) => {
+  if (!drag || e.pointerId !== drag.id) return;
+  if (!drag.active) return endDrag();
+  const target = dropTargetAt(e.clientX, e.clientY);
+  const it = byId(drag.row.dataset.id);
+  endDrag();
+  lastSwipeAt = Date.now();
+  if (target) assignStore(it, target.dataset.dropStore);
+});
+
+$('#main').addEventListener('pointercancel', (e) => {
+  if (drag && e.pointerId === drag.id) endDrag();
+});
+
+// While dragging, the page must not scroll under your finger.
+document.addEventListener('touchmove', (e) => drag?.active && e.preventDefault(), { passive: false });
+$('#main').addEventListener('contextmenu', (e) => e.target.closest('.shop-list') && e.preventDefault());
 
 // Swipe a shopping-list row left to take it off the list. The row only follows the finger
 // once the gesture is clearly sideways, so scrolling the list still works normally.
@@ -1498,7 +1617,7 @@ $('#main').addEventListener('pointerdown', (e) => {
 });
 
 $('#main').addEventListener('pointermove', (e) => {
-  if (!swipe || e.pointerId !== swipe.id) return;
+  if (!swipe || e.pointerId !== swipe.id || drag?.active) return;
   const dx = e.clientX - swipe.x;
   const dy = e.clientY - swipe.y;
   if (!swipe.active) {
@@ -1583,6 +1702,12 @@ $('#sheet').addEventListener('click', (e) => {
     $('#typeInput').value = example.textContent;
     $('#typeInput').focus();
     return;
+  }
+  const pick = e.target.closest('[data-assign-store]');
+  if (pick) {
+    const it = byId(pick.closest('[data-id]').dataset.id);
+    closeSheet();
+    return assignStore(it, pick.dataset.assignStore);
   }
   const share = e.target.closest('[data-share]')?.dataset.share;
   if (share) {
