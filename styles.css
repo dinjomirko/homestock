@@ -149,11 +149,16 @@ h2.group { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; co
 .bought .check::before { background: var(--accent); }
 .bought .check svg { opacity: 1; color: var(--accent-ink); }
 .bought .name { text-decoration: line-through; color: var(--muted); }
-.swipe-row { position: relative; border-top: 1px solid var(--line); background: var(--danger); touch-action: pan-y; }
+.swipe-row { position: relative; border-top: 1px solid var(--line); touch-action: pan-y; }
 .swipe-row:first-child { border-top: 0; }
-.swipe-row:not(.swipeable) { background: none; }
 .swipe-row > .item { border-top: 0; background: var(--card); position: relative; }
-.swipe-label { position: absolute; right: 18px; top: 50%; transform: translateY(-50%); color: #fff; font-weight: 700; font-size: 15px; opacity: .75; transition: opacity .1s; }
+.swipe-label { position: absolute; top: 50%; transform: translateY(-50%); color: #fff; font-weight: 700; font-size: 15px; opacity: 0; transition: opacity .1s; }
+.swipe-label.act-left { right: 18px; }
+.swipe-label.act-right { left: 18px; color: var(--accent-ink); }
+.swipe-row.going-left { background: var(--danger); }
+.swipe-row.going-right { background: var(--accent); }
+.swipe-row.going-right:has(.act-right.off) { background: var(--warn); }
+.swipe-row.going-left .act-left, .swipe-row.going-right .act-right { opacity: .75; }
 .swipe-row.armed .swipe-label { opacity: 1; }
 .remove { flex: none; width: 44px; height: 44px; border: 0; background: none; border-radius: 50%; display: grid; place-items: center; color: var(--muted); }
 .remove svg { width: 18px; height: 18px; }
@@ -348,8 +353,6 @@ body.editing .top, body.editing .tabbar { display: none; }
 .thumb:has(.mono) { background: var(--accent-soft); }
 
 /* Stock rows swipe green to put something on the list */
-.swipe-row.to-list { background: var(--accent); }
-.swipe-row.to-list .swipe-label { color: var(--accent-ink); }
 .stepper button:disabled { color: var(--muted); opacity: .35; }
 
 /* Store filter on the shopping list */

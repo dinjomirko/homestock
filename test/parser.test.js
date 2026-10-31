@@ -159,6 +159,21 @@ test('an "and" list is split unless one item has every word', () => {
   assert.deepEqual(r2.map((a) => a.item?.id), ['7']);
 });
 
+test('list requests use your exact words; stock changes match loosely', () => {
+  const need = (t) => resolveActions(parseCommand(t), items)[0].item?.id ?? null;
+  assert.equal(need('add tomatoes to the list'), null); // not "Diced Tomatoes"
+  assert.equal(need('add diced tomatoes to the list'), '3');
+  assert.equal(need('add paper towels to the list'), '1');
+  assert.equal(need('add bounty paper towels to the list'), '1'); // brand is ignored
+  assert.equal(need('we need milk'), '4');
+  const packaged = [{ id: '9', name: 'Charmin Ultra Soft Toilet Paper 12 Mega Rolls', brand: 'Charmin', qty: 3 }];
+  assert.equal(resolveActions(parseCommand('add ultra soft toilet paper rolls to the list'), packaged)[0].item?.id, '9');
+  const sized = [{ id: '10', name: 'Diced Tomatoes 14.5 Ounces Value Pack', brand: "Hunt's", qty: 2 }];
+  assert.equal(resolveActions(parseCommand('add diced tomatoes to the list'), sized)[0].item?.id, '10');
+  // Using something up still finds what you have.
+  assert.equal(resolveActions(parseCommand('used 2 cans of tomatoes'), items)[0].item?.id, '3');
+});
+
 test('guessing location and pack size', () => {
   assert.equal(guessLocation('Charmin Ultra Soft Toilet Paper'), 'Bathroom');
   assert.equal(guessLocation('Bounty Paper Towels'), 'Pantry');

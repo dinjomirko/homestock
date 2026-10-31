@@ -320,16 +320,41 @@ export function matchItem(query, items, preferStocked = false) {
   return best;
 }
 
+// Words that describe the package, not the product ("6 Double Rolls", "14.5 oz").
+const SIZE_WORDS = new Set(['oz', 'ounce', 'fl', 'lb', 'pound', 'g', 'gram', 'kg', 'ml', 'l', 'liter', 'litre', 'ct', 'count',
+  'pack', 'pk', 'pc', 'pcs', 'qt', 'quart', 'gal', 'gallon', 'value', 'family', 'jumbo', 'mega', 'double', 'triple'].map(stem));
+
+function coreTokens(text, brandT) {
+  return [...new Set(tokens(text).filter((t) => !brandT.has(t) && !SIZE_WORDS.has(t) && !/^\d/.test(t)))].sort().join(' ');
+}
+
+// Same product name as what was said, ignoring brand, package size and plurals:
+// "paper towels" is "Bounty Paper Towels", but "tomatoes" is not "Diced Tomatoes".
+export function matchExact(query, items) {
+  for (const item of items) {
+    const brandT = new Set(tokens(item.brand));
+    const want = coreTokens(query, brandT);
+    if (want && want === coreTokens(item.name, brandT)) return { item, score: 1, coverage: 1 };
+  }
+  return null;
+}
+
 // Attach the matching inventory item to each parsed action. "milk and eggs" that doesn't
 // match one item is split into two when each half matches (or when it's a shopping request).
+// Shopping-list requests use your exact words (a new list item if nothing has that name);
+// everything about stock you already have matches loosely.
 export function resolveActions(actions, items) {
   const out = [];
   for (const a of actions) {
     const prefer = a.action === 'remove' || a.action === 'out';
-    const m = matchItem(a.name, items, prefer);
+    const find = (name) =>
+      a.action === 'need' ? matchExact(name, items)
+      : a.action === 'unlist' ? matchExact(name, items) || matchItem(name, items)
+      : matchItem(name, items, prefer);
+    const m = find(a.name);
     if (/ and /.test(a.name) && !(m && m.coverage === 1)) {
       const parts = a.name.split(/\s+and\s+/).filter(Boolean);
-      const ms = parts.map((p) => matchItem(p, items, prefer));
+      const ms = parts.map(find);
       if (ms.every(Boolean) || ['need', 'out', 'unlist'].includes(a.action)) {
         parts.forEach((p, i) => out.push({ ...a, name: p, item: ms[i]?.item || null }));
         continue;

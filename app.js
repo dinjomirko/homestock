@@ -175,8 +175,9 @@ function itemRow(it, showLoc) {
   const cls = it.qty <= 0 ? 'out' : listed ? 'low' : '';
   const meta = [esc(it.brand), showLoc ? esc(it.location) : '', useByHtml(it), listed ? '<span class="warn">On list</span>' : '']
     .filter(Boolean).join(' · ');
-  return `<li class="swipe-row swipeable ${listed ? '' : 'to-list'}" data-id="${it.id}" data-swipe="${listed ? 'unlist' : 'tolist'}">
-    <span class="swipe-label" aria-hidden="true">${listed ? 'Off the list' : 'Add to list'}</span>
+  return `<li class="swipe-row swipeable" data-id="${it.id}" data-swipe-right="${listed ? 'unlist' : 'tolist'}" data-swipe-left="delete">
+    <span class="swipe-label act-right ${listed ? 'off' : ''}" aria-hidden="true">${listed ? 'Off the list' : 'Add to list'}</span>
+    <span class="swipe-label act-left" aria-hidden="true">Delete</span>
     <div class="item ${ui.flash === it.id ? 'flash' : ''}">
       ${thumb(it)}
       <button class="info" data-act="edit"><div class="name">${esc(it.name)}</div>${meta ? `<div class="meta">${meta}</div>` : ''}</button>
@@ -236,7 +237,8 @@ function renderStock() {
   } else {
     html = `<ul class="list" style="margin-top:12px">${items.map((i) => itemRow(i, ui.loc === 'All' || ui.loc === 'soon')).join('')}</ul>`;
   }
-  return html + listNote + `<button class="add-row" data-act="add">+ Add an item</button>`;
+  const tip = prefs.stockSwipeTipSeen ? '' : '<p class="note" style="margin:10px 4px 0">Swipe an item right to add it to the shopping list, or left to delete it.</p>';
+  return tip + html + listNote + `<button class="add-row" data-act="add">+ Add an item</button>`;
 }
 
 function renderChips() {
@@ -258,8 +260,8 @@ function renderChips() {
 function shopRow(it, bought) {
   const status = it.listOnly ? 'Not in stock' : it.qty <= 0 ? 'Out' : `${esc(qtyText(it))} left`;
   const meta = bought ? `Back in stock · ${esc(qtyText(it))}` : `${status} · ${esc(it.location)}`;
-  return `<li class="swipe-row ${bought ? '' : 'swipeable'}" data-id="${it.id}" data-swipe="unlist">
-    ${bought ? '' : '<span class="swipe-label" aria-hidden="true">Remove</span>'}
+  return `<li class="swipe-row ${bought ? '' : 'swipeable'}" data-id="${it.id}" data-swipe-left="unlist">
+    ${bought ? '' : '<span class="swipe-label act-left" aria-hidden="true">Remove</span>'}
     <div class="item ${bought ? 'bought' : ''} ${ui.flash === it.id ? 'flash' : ''}">
       <button class="check" data-act="${bought ? 'unbuy' : 'got'}" role="checkbox" aria-checked="${bought}" aria-label="${esc(it.name)}">
         <svg viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></svg></button>
@@ -372,6 +374,15 @@ function unlist(it) {
     if (isLow(it)) it.skipAt = it.qty;
     it.updated = Date.now();
   }
+}
+
+function deleteItem(it) {
+  if (!it) return;
+  checkpoint();
+  state.items = state.items.filter((i) => i.id !== it.id);
+  buzz(20);
+  save();
+  toast(`Deleted ${it.name}`, { undo: true });
 }
 
 function removeFromList(it) {
@@ -708,11 +719,8 @@ $('#main').addEventListener('click', (e) => {
   if (act === 'cancel') closeEditor(null);
   if (act === 'link') linkScannedTo(byId(e.target.closest('[data-id]').dataset.id));
   if (act === 'delete' && confirm(`Delete ${item.name}?`)) {
-    checkpoint();
-    state.items = state.items.filter((i) => i.id !== item.id);
-    save();
     closeEditor(null);
-    toast(`Deleted ${item.name}`, { undo: true });
+    deleteItem(item);
   }
 });
 
@@ -1650,16 +1658,17 @@ $('#main').addEventListener('pointercancel', (e) => {
 document.addEventListener('touchmove', (e) => drag?.active && e.preventDefault(), { passive: false });
 $('#main').addEventListener('contextmenu', (e) => e.target.closest('.shop-list') && e.preventDefault());
 
-// Swipe a shopping-list row left to take it off the list. The row only follows the finger
-// once the gesture is clearly sideways, so scrolling the list still works normally.
+// Swipe rows sideways. Stock: right puts it on the shopping list (or takes it off), left
+// deletes it. Shopping list: left takes it off the list. The row only follows the finger once
+// the gesture is clearly sideways, so scrolling still works normally.
 let swipe = null;
 let lastSwipeAt = 0;
-const SWIPE_REMOVE = 90;
+const SWIPE_ACT = 90;
 
 $('#main').addEventListener('pointerdown', (e) => {
   const row = e.target.closest('.swipe-row.swipeable');
   if (!row || e.pointerType === 'mouse' || e.button > 0) return;
-  swipe = { row, item: row.querySelector('.item'), id: e.pointerId, x: e.clientX, y: e.clientY, dx: 0, active: false };
+  swipe = { row, item: row.querySelector('.item'), id: e.pointerId, x: e.clientX, y: e.clientY, dx: 0, dir: null, active: false };
 });
 
 $('#main').addEventListener('pointermove', (e) => {
@@ -1668,38 +1677,48 @@ $('#main').addEventListener('pointermove', (e) => {
   const dy = e.clientY - swipe.y;
   if (!swipe.active) {
     if (Math.abs(dy) > 10 && Math.abs(dy) > Math.abs(dx)) return (swipe = null);
-    if (dx > -12) return;
+    if (Math.abs(dx) < 12) return;
+    const dir = dx < 0 ? 'left' : 'right';
+    if (!swipe.row.dataset[dir === 'left' ? 'swipeLeft' : 'swipeRight']) return (swipe = null);
     swipe.active = true;
+    swipe.dir = dir;
+    swipe.row.classList.add(`going-${dir}`);
     try { swipe.row.setPointerCapture(e.pointerId); } catch {}
     swipe.item.style.transition = 'none';
   }
-  swipe.dx = Math.min(0, dx);
+  swipe.dx = swipe.dir === 'left' ? Math.min(0, dx) : Math.max(0, dx);
   swipe.item.style.transform = `translateX(${swipe.dx}px)`;
-  swipe.row.classList.toggle('armed', swipe.dx < -SWIPE_REMOVE);
+  swipe.row.classList.toggle('armed', Math.abs(swipe.dx) > SWIPE_ACT);
 });
 
 function endSwipe(e) {
   if (!swipe || e.pointerId !== swipe.id) return;
-  const { row, item, dx, active } = swipe;
+  const { row, item, dx, dir, active } = swipe;
   swipe = null;
   if (!active) return;
   lastSwipeAt = Date.now();
   item.style.transition = 'transform .18s ease-out';
-  if (dx < -SWIPE_REMOVE && e.type === 'pointerup') {
-    const it = byId(row.dataset.id);
-    if (row.dataset.swipe === 'tolist') {
-      item.style.transform = '';
-      putOnList(it);
-    } else if (row.closest('.shop-list')) {
-      item.style.transform = 'translateX(-110%)';
-      setTimeout(() => removeFromList(it), 160);
-    } else {
-      item.style.transform = '';
-      removeFromList(it);
-    }
+  const settle = () => setTimeout(() => row.classList.remove('going-left', 'going-right', 'armed'), 180);
+  if (Math.abs(dx) <= SWIPE_ACT || e.type !== 'pointerup') {
+    item.style.transform = '';
+    return settle();
+  }
+  const it = byId(row.dataset.id);
+  const action = row.dataset[dir === 'left' ? 'swipeLeft' : 'swipeRight'];
+  if (!row.closest('.shop-list') && !prefs.stockSwipeTipSeen) {
+    prefs.stockSwipeTipSeen = true;
+    savePrefs();
+  }
+  // Actions that take the row away slide it off-screen; the others spring back.
+  const leaves = action === 'delete' || (action === 'unlist' && row.closest('.shop-list'));
+  if (leaves) {
+    item.style.transform = `translateX(${dir === 'left' ? -110 : 110}%)`;
+    setTimeout(() => (action === 'delete' ? deleteItem(it) : removeFromList(it)), 160);
   } else {
     item.style.transform = '';
-    row.classList.remove('armed');
+    settle();
+    if (action === 'tolist') putOnList(it);
+    else removeFromList(it);
   }
 }
 $('#main').addEventListener('pointerup', endSwipe);
