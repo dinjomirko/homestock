@@ -398,3 +398,6 @@ body.editing .top, body.editing .tabbar { display: none; }
 .swipe-row.drag-src { background: var(--bg); }
 .swipe-row.drag-src .swipe-label { display: none; }
 .swipe-row.drag-src > .item { opacity: .3; }
+
+.list-note { display: flex; align-items: center; gap: 12px; margin-top: 14px; padding: 12px 14px; }
+.list-note p { margin: 0; flex: 1; color: var(--ink); font-size: 14px; }

@@ -75,6 +75,8 @@ function newItem(fields) {
 }
 
 const byId = (id) => state.items.find((i) => i.id === id);
+// Out of something that's on the shopping list: it lives on the list, not in Stock.
+const inStock = (it) => !(it.qty <= 0 && isLow(it));
 const isLow = (it) => it.need || (it.low != null && it.qty <= it.low && it.skipAt !== it.qty);
 const shoppingItems = () => state.items.filter(isLow).sort((a, b) => a.location.localeCompare(b.location) || a.name.localeCompare(b.name));
 
@@ -199,14 +201,25 @@ function renderStock() {
     </div>`;
   }
   const q = ui.q.trim().toLowerCase();
-  let items = state.items.filter((i) => ui.loc === 'All' || (ui.loc === 'soon' ? useSoon(i) : i.location === ui.loc));
-  if (q) items = items.filter((i) => `${i.name} ${i.brand} ${i.location}`.toLowerCase().includes(q));
+  const matches = (i) => `${i.name} ${i.brand} ${i.location}`.toLowerCase().includes(q);
+  let items = state.items.filter(inStock).filter((i) => ui.loc === 'All' || (ui.loc === 'soon' ? useSoon(i) : i.location === ui.loc));
+  if (q) items = items.filter(matches);
   items.sort(ui.loc === 'soon' ? (a, b) => daysLeft(a) - daysLeft(b) : (a, b) => a.name.localeCompare(b.name));
+  // Searching for something you're out of: point to the list rather than offering a duplicate.
+  const onListOnly = q ? state.items.filter((i) => !inStock(i) && matches(i)) : [];
+  const listNote = onListOnly.length
+    ? `<div class="card list-note"><p><b>${onListOnly.map((i) => esc(i.name)).join(', ')}</b> ${onListOnly.length === 1 ? 'is' : 'are'} out and on your shopping list.</p>
+       <button class="btn small" data-act="go-shop">View shopping list</button></div>`
+    : '';
   if (!items.length) {
-    return q
-      ? `<div class="empty"><p>Nothing called “${esc(ui.q)}” yet.</p>
-         <button class="btn primary" data-act="add-named">Add “${esc(ui.q.trim())}”</button></div>`
-      : '<div class="empty"><p>Nothing here.</p></div>';
+    if (onListOnly.length) return listNote;
+    if (q) {
+      return `<div class="empty"><p>Nothing called “${esc(ui.q)}” yet.</p>
+         <button class="btn primary" data-act="add-named">Add “${esc(ui.q.trim())}”</button></div>`;
+    }
+    const out = state.items.length - state.items.filter(inStock).length;
+    return `<div class="empty"><p>Nothing in stock here.${out ? ` ${out} thing${out === 1 ? ' is' : 's are'} on your shopping list.` : ''}</p>
+      ${out ? '<button class="btn" data-act="go-shop">View shopping list</button>' : ''}</div>`;
   }
 
   let html;
@@ -220,12 +233,12 @@ function renderStock() {
   } else {
     html = `<ul class="list" style="margin-top:12px">${items.map((i) => itemRow(i, ui.loc === 'All' || ui.loc === 'soon')).join('')}</ul>`;
   }
-  return html + `<button class="add-row" data-act="add">+ Add an item</button>`;
+  return html + listNote + `<button class="add-row" data-act="add">+ Add an item</button>`;
 }
 
 function renderChips() {
   const counts = {};
-  state.items.forEach((i) => (counts[i.location] = (counts[i.location] || 0) + 1));
+  state.items.filter(inStock).forEach((i) => (counts[i.location] = (counts[i.location] || 0) + 1));
   const locs = allLocations().filter((l) => counts[l]);
   const soon = state.items.filter(useSoon).length;
   if (ui.loc === 'soon' && !soon) ui.loc = 'All';
@@ -321,11 +334,13 @@ function renderShop() {
 
 function bump(it, dir) {
   checkpoint();
+  const wasInStock = inStock(it);
   it.qty = round(Math.max(0, it.qty + dir));
   if (dir > 0 && it.qty > (it.low ?? -1)) it.need = false;
   it.updated = Date.now();
   buzz(15);
   save();
+  if (wasInStock && !inStock(it)) toast(`${it.name} is out — moved to the shopping list`, { undo: true });
 }
 
 function markBought(it) {
@@ -1532,6 +1547,10 @@ $('#main').addEventListener('click', (e) => {
     }
     case 'sample': return loadSample();
     case 'share-list': return shareShoppingList();
+    case 'go-shop':
+      ui.view = 'shop';
+      render();
+      return scrollTo(0, 0);
     case 'recipe': return shareKitchen();
   }
 });
