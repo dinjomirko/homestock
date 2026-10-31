@@ -1,0 +1,10 @@
+{
+  "name": "Homestock",
+  "short_name": "Homestock",
+  "description": "Know what you have at home: pantry, bathroom, garage.",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f6f5f1",
+  "theme_color": "#1f7a5c",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}

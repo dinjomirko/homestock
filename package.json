@@ -1,0 +1,10 @@
+{
+  "name": "homestock",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "python3 -m http.server 5190",
+    "test": "node --test"
+  }
+}
