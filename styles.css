@@ -493,3 +493,8 @@ body { font-variant-numeric: lining-nums; }
 .paste-row { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
 .paste-row input[name="pq"] { width: 64px; flex: none; text-align: center; margin: 0; }
 .paste-row input[name="pn"] { flex: 1; margin: 0; }
+
+/* Household code */
+.hh-code { text-align: center; }
+.hh-code b { display: block; font-family: var(--serif); font-size: 34px; letter-spacing: .18em; margin: 4px 0 6px; font-variant-numeric: lining-nums; }
+.hh-code p { margin: 0 0 10px; }

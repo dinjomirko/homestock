@@ -1,9 +1,9 @@
 // Network first so updates show up right away; falls back to the cache when offline.
 // Product lookups are never cached.
-const VERSION = 23;
+const VERSION = 24;
 const CACHE = `homestock-v${VERSION}`;
 const SHELL = [
-  './', 'index.html', `styles.css?v=${VERSION}`, `app.js?v=${VERSION}`, `parser.js?v=${VERSION}`, 'scan-worker.js',
+  './', 'index.html', `styles.css?v=${VERSION}`, `app.js?v=${VERSION}`, `parser.js?v=${VERSION}`, `sync.js?v=${VERSION}`, `config.js?v=${VERSION}`, 'scan-worker.js',
   'manifest.webmanifest', 'icon.svg', 'apple-touch-icon.png',
 ];
 
@@ -22,7 +22,7 @@ self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
   if (e.request.method !== 'GET') return;
   const sameOrigin = url.origin === location.origin;
-  if (!sameOrigin && !['unpkg.com', 'fonts.googleapis.com', 'fonts.gstatic.com'].includes(url.hostname)) return;
+  if (!sameOrigin && !['unpkg.com', 'cdn.jsdelivr.net', 'fonts.googleapis.com', 'fonts.gstatic.com'].includes(url.hostname)) return;
   // Our own files are always checked with the server (a quick "not modified" when nothing
   // changed), so a page never runs a mix of old and new files after an update.
   const request = sameOrigin ? fetch(url.href, { cache: 'no-cache', credentials: 'same-origin' }) : fetch(e.request);

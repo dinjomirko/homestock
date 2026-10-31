@@ -1,7 +1,8 @@
 import {
   parseCommand, resolveActions, matchItem, matchExact, guessLocation, guessEmoji, parsePack, parseListLines,
   suggestShelfLife, openLife, isoDate, DEFAULT_LOCATIONS,
-} from './parser.js?v=23';
+} from './parser.js?v=24';
+import { initSync, pushSoon, syncInfo, createHousehold, joinHousehold, leaveHousehold } from './sync.js?v=24';
 
 const APP_VERSION = new URL(import.meta.url).searchParams.get('v') || 'dev';
 const STORAGE_KEY = 'homestock.v1';
@@ -44,6 +45,7 @@ function load(key, fallback) {
 
 function savePrefs() {
   try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch {}
+  pushSoon(); // stores and places are shared with the household
 }
 
 let persistAsked = false;
@@ -59,6 +61,7 @@ function save() {
   updateBadge();
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    pushSoon();
   } catch {
     setTimeout(() => toast('Couldn’t save — this phone’s storage for Key Record is full. Remove some photos, or back up from the ⋯ menu.'), 0);
   }
@@ -987,7 +990,7 @@ function renderEditor() {
     </details>
     <button class="primary" type="submit">${fromScan ? 'Save & keep scanning' : isNew ? 'Add item' : 'Save'}</button>
     ${isNew ? '' : `<button type="button" class="danger" data-edit="delete">Delete item</button>
-      <p class="note" style="text-align:center">Last changed ${ago(item.updated)}</p>`}
+      <p class="note" style="text-align:center">Last changed ${ago(item.updated)}${item.by && syncInfo().joined ? ` by ${esc(item.by)}` : ''}</p>`}
   </form>`;
 }
 
@@ -1115,6 +1118,8 @@ $('#main').addEventListener('submit', (e) => {
     savePrefs();
   }
   if (isNew) state.items.push(item);
+  // Someone else's change may have replaced this item while the page was open; this save wins.
+  else if (byId(item.id) !== item) state.items = byId(item.id) ? state.items.map((i) => (i.id === item.id ? item : i)) : [...state.items, item];
   ui.flash = item.id;
   save();
   closeEditor({ item, note: isNew ? `New · ${qtyText(item)}` : 'Saved' });
@@ -1129,6 +1134,8 @@ function openMenu() {
       <button data-menu="paste">Paste a list</button>
       <button data-menu="places">Places</button>
       <button data-menu="stores">Stores</button>
+      <button data-menu="household">Household sharing${syncInfo().joined ? ' · On' : ''}</button>
+      <button data-menu="siri">Set up “Hey Siri, Key Record”</button>
       <button data-menu="badge">Use-soon count on app icon: ${prefs.badge ? 'On' : 'Off'}</button>
       <button data-menu="recipe">Copy kitchen list for recipe ideas</button>
       <button data-menu="sound">Scan beep: ${prefs.sound ? 'On' : 'Off'}</button>
@@ -1333,6 +1340,98 @@ $('#main').addEventListener('submit', (e) => {
   e.preventDefault();
   addPasted(e.target);
 });
+
+// ---------- Household sharing ----------
+
+const SYNC_WORDS = { synced: 'Up to date', connecting: 'Connecting…', offline: 'Offline — changes will sync when you’re back online', off: '' };
+
+function openHousehold() {
+  const info = syncInfo();
+  let body;
+  if (!info.configured) {
+    body = '<p class="note">Household sharing isn’t connected to its cloud database yet.</p>';
+  } else if (!info.joined) {
+    body = `<p class="note">Share one stock and shopping list with everyone in your home. Changes show up on every phone within a second or two, and work offline too.</p>
+      <div class="row-actions"><button class="btn" data-hh="join">Join with a code</button><button class="btn primary" data-hh="create">Start a household</button></div>`;
+  } else {
+    body = `<p class="note">${info.members.length ? `Shared with ${info.members.map(esc).join(', ')}.` : 'Shared household.'} ${esc(SYNC_WORDS[info.status] || '')}</p>
+      <div class="card hh-code"><span class="label">Household code</span><b>${esc(info.code)}</b>
+        <p>Others join from ⋯ → Household sharing → Join with a code. Keep it somewhere safe; anyone with it can join.</p>
+        <button class="btn small" data-hh="copy">Copy code</button></div>
+      <button class="danger" data-hh="leave">Leave household</button>`;
+  }
+  openSheet(`<div class="sheet-head"><h2>Household sharing</h2><button class="link" data-close>Done</button></div>${body}`);
+}
+
+async function householdAction(act) {
+  const info = syncInfo();
+  try {
+    if (act === 'copy') {
+      await navigator.clipboard?.writeText(info.code);
+      return toast('Code copied');
+    }
+    if (act === 'leave') {
+      if (!confirm('Leave the household? This phone keeps a copy of everything but stops syncing.')) return;
+      await leaveHousehold();
+      toast('Left the household');
+      return openHousehold();
+    }
+    const name = prompt('Your first name — shown to others in the household', info.name || '')?.trim();
+    if (!name) return;
+    if (act === 'create') {
+      toast('Setting up…');
+      const code = await createHousehold(name);
+      toast(`Household started. Code: ${code}`);
+    } else {
+      const code = prompt('Household code (8 letters and numbers)')?.trim();
+      if (!code) return;
+      const keepMine = state.items.length ? confirm(`Also add the ${state.items.length} items on this phone to the household? Cancel to use only the household’s items.`) : false;
+      toast('Joining…');
+      await joinHousehold(code, name, keepMine);
+      toast('Joined — you’re now sharing');
+    }
+    render();
+    openHousehold();
+  } catch (err) {
+    toast(err.message || 'Couldn’t reach the household — check your connection.');
+  }
+}
+
+function persistOnly() {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch {}
+}
+
+// ---------- Hey Siri ----------
+//
+// A one-time iPhone Shortcut dictates what you say and opens this page with ?say=…;
+// the app then applies it like a typed command. Shortcuts open links in Safari, which keeps
+// its own data, so Safari joins the household once and everything stays in step.
+
+function openSiriSetup() {
+  const link = `${location.origin}${location.pathname}?say=`;
+  openSheet(`
+    <div class="sheet-head"><h2>Hey Siri, Key Record</h2><button class="link" data-close>Done</button></div>
+    <ol class="steps">
+      <li>Open the <b>Shortcuts</b> app and tap <b>+</b>.</li>
+      <li>Add the action <b>Dictate Text</b>.</li>
+      <li>Add <b>URL Encode</b> (it uses the Dictated Text).</li>
+      <li>Add <b>Open URLs</b>. For the URL, paste the link below, then tap at its end and insert <b>URL Encoded Text</b>.</li>
+      <li>Rename the shortcut <b>Key Record</b>.</li>
+    </ol>
+    <pre class="share-preview">${esc(link)}</pre>
+    <div class="row-actions"><button class="btn primary" data-siri="copy">Copy link</button></div>
+    <p class="note">Then say “Hey Siri, Key Record” and speak, e.g. “used two cans of tomatoes”. It opens in Safari, so first open Key Record in Safari once and join your household there (⋯ → Household sharing) so both stay in step.</p>`);
+}
+
+// Run a command passed in the link by the Siri shortcut.
+function runFromLink() {
+  const said = new URLSearchParams(location.search).get('say');
+  if (!said) return;
+  history.replaceState(null, '', location.pathname);
+  openVoice();
+  $('#heard').textContent = `“${said}”`;
+  handleCommand([said], false);
+}
 
 function openStores() {
   const count = (st) => state.items.filter((i) => i.store === st).length;
@@ -2321,6 +2420,12 @@ $('#sheet').addEventListener('click', (e) => {
     closeSheet();
     return assignStore(it, pick.dataset.assignStore);
   }
+  const hh = e.target.closest('[data-hh]')?.dataset.hh;
+  if (hh) return householdAction(hh);
+  if (e.target.closest('[data-siri="copy"]')) {
+    navigator.clipboard?.writeText(`${location.origin}${location.pathname}?say=`).then(() => toast('Link copied'), () => {});
+    return;
+  }
   const share = e.target.closest('[data-share]')?.dataset.share;
   if (share) {
     const text = $('#sheet')._shareText;
@@ -2363,6 +2468,8 @@ $('#sheet').addEventListener('click', (e) => {
   if (m === 'stores') openStores();
   if (m === 'places') openPlaces();
   if (m === 'paste') openPaste();
+  if (m === 'household') openHousehold();
+  if (m === 'siri') openSiriSetup();
   if (m === 'recipe') shareKitchen();
   if (m === 'export') exportBackup();
   if (m === 'import') $('#importFile').click();
@@ -2437,4 +2544,25 @@ if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.
 render();
 // Tells the startup safety net in index.html that the app is running.
 window.homestockReady = true;
+
+// Join up with the household (if this phone is in one), then run anything Siri passed in.
+Promise.race([
+  initSync({
+    items: () => state.items,
+    setItems: (items) => {
+      state.items = items;
+      persistOnly();
+    },
+    settings: () => ({ stores: prefs.stores, places: prefs.places }),
+    applySettings: (data) => {
+      if (Array.isArray(data.stores)) prefs.stores = data.stores;
+      if (Array.isArray(data.places)) prefs.places = data.places;
+      try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch {}
+    },
+    persist: persistOnly,
+    onRemote: () => !ui.editor && !ui.paste && !drag?.active && !swipe?.active && render(),
+    onStatus: () => {},
+  }).catch(() => {}),
+  new Promise((r) => setTimeout(r, 5000)),
+]).then(runFromLink);
 try { sessionStorage.removeItem('homestock.recovered'); } catch {}
