@@ -122,6 +122,25 @@ test('on the shopping list, "add X" means put it on the list', () => {
   assert.equal(parseCommand('bought bananas', { listContext: true })[0].action, 'add');
 });
 
+test('moving things off the list into stock', () => {
+  const p = (t) => {
+    const r = parseCommand(t);
+    assert.equal(r.length, 1, t);
+    return [r[0].action, r[0].qty, r[0].name, r[0].location];
+  };
+  assert.deepEqual(p('move tomatoes from shopping list to pantry'), ['restock', null, 'tomatoes', 'Pantry']);
+  assert.deepEqual(p('Move the tomatoes from the shopping list to the pantry'), ['restock', null, 'tomatoes', 'Pantry']);
+  assert.deepEqual(p('put the eggs from the list in the fridge'), ['restock', null, 'eggs', 'Fridge']);
+  assert.deepEqual(p('move 2 cans of tomatoes from the list to the pantry'), ['restock', 2, 'tomatoes', 'Pantry']);
+  assert.deepEqual(p('mark paper towels as bought'), ['restock', null, 'paper towels', null]);
+  assert.deepEqual(p('check off milk'), ['restock', null, 'milk', null]);
+  assert.deepEqual(p('move the batteries to the garage'), ['restock', null, 'batteries', 'Garage']);
+  assert.deepEqual(p('move tomatoes from the fridge to the pantry'), ['restock', null, 'tomatoes', 'Pantry']);
+  // Unchanged: taking something off the list, and asking about something.
+  assert.equal(one('remove milk from the shopping list').action, 'unlist');
+  assert.equal(one('check on the milk').action, 'query');
+});
+
 test('location at the end of a sentence', () => {
   const a = one('Took 2 cans of paint out of the garage');
   assert.deepEqual([a.action, a.qty, a.name, a.location], ['remove', 2, 'paint', 'Garage']);

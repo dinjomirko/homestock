@@ -29,6 +29,8 @@ const ACTION_PHRASES = {
     'getting low on', 'low on', 'almost out of', 'nearly out of', 'buy more', 'get more',
     'pick up more', 'should buy', 'should get',
   ],
+  // Bought something on the list: off the list and into stock (like ticking it off).
+  restock: ['move', 'moving', 'moved', 'mark', 'mark off', 'check off', 'tick off'],
   unlist: [
     "don't need", 'dont need', 'do not need', 'no longer need', "don't need any", 'cross off', 'cross',
     'scratch off', 'scratch',
@@ -142,7 +144,7 @@ export function parseCommand(text, opts = {}) {
 }
 
 // Questions don't change anything: "how many paper towels do we have", "do we have eggs".
-const QUESTION = /^(?:(?:hey|ok|okay|so|um|uh)\s+)*(?:how many|how much|do we have|do i have|do we still have|have we got|have i got|is there|are there|got any|where is|where are|where's|wheres|check on|check)\s+(.+)$/;
+const QUESTION = /^(?:(?:hey|ok|okay|so|um|uh)\s+)*(?:how many|how much|do we have|do i have|do we still have|have we got|have i got|is there|are there|got any|where is|where are|where's|wheres|check on|check(?!\s+off))\s+(.+)$/;
 
 function parseQuery(clean, ctx) {
   const m = clean.match(QUESTION);
@@ -220,17 +222,26 @@ function parseClause(clause, prevAction, ctx = {}) {
   // Trailing "from the stock" / "in the garage" / "to the (Costco) shopping list" /
   // "to the shopping list for Jewel" / "at Aldi". A bare "to the shopping" is a list too:
   // Safari sometimes cuts off the last word.
-  let location = null;
+  // "Move X from the list to the pantry": the place after "to/in" is where it goes.
+  let to = null;
+  let from = null;
   let store = null;
   for (let k = 0; k < 3; k++) {
     const t = s.match(TAIL);
     if (!t) break;
+    const prep = t[2];
     const tail = t[3].trim();
     const list = tail.match(/^(?:(.+?) )?(?:(?:shopping |grocery )?list|shopping|grocery)$/);
     if (list) {
-      action = action === 'remove' || action === 'unlist' ? 'unlist' : 'need';
+      action =
+        action === 'remove' || action === 'unlist' ? 'unlist'
+        : action === 'restock' || (prep === 'from' && action) ? 'restock' // "put X from the list in the fridge"
+        : 'need';
       if (list[1]) store = findStore(list[1], stores) || store;
-    } else if (locByLower.has(tail)) location = locByLower.get(tail);
+    } else if (locByLower.has(tail)) {
+      if (['from', 'out of', 'off', 'off of'].includes(prep)) from ||= locByLower.get(tail);
+      else to ||= locByLower.get(tail);
+    }
     else if (findStore(tail, stores)) store = findStore(tail, stores);
     // "…to the list for tomorrow": not a store, but the list part before it still counts.
     else if (t[2] === 'for' && /\b(?:list|shopping|grocery)$/.test(t[1])) { /* drop it */ }
@@ -238,6 +249,7 @@ function parseClause(clause, prevAction, ctx = {}) {
     s = t[1];
   }
   if (!action) action = prevAction;
+  const location = to || from;
 
   let w = s.split(' ').filter(Boolean);
   let qty = null;
@@ -267,6 +279,7 @@ function parseClause(clause, prevAction, ctx = {}) {
   while (w.length && ['the', 'some', 'my', 'our', 'more', 'of', 'any', 'all', 'a', 'an', 'your'].includes(w[0])) w.shift();
   while (w.length && ['please', 'thanks', 'now', 'today', 'too', 'left'].includes(w.at(-1))) w.pop();
   let name = w.join(' ');
+  if (action === 'restock') name = name.replace(/\s+(?:as\s+)?(?:bought|purchased|done|got|gotten|in stock)$/, '');
 
   if (action === 'set' && qty === null) {
     const tm = name.match(/^(.*?)\s+(?:to|at|is|are)\s+(\S+)$/) || name.match(/^(.*?)\s+(\d+(?:\.\d+)?)$/);
@@ -349,7 +362,7 @@ export function resolveActions(actions, items) {
     const prefer = a.action === 'remove' || a.action === 'out';
     const find = (name) =>
       a.action === 'need' ? matchExact(name, items)
-      : a.action === 'unlist' ? matchExact(name, items) || matchItem(name, items)
+      : a.action === 'unlist' || a.action === 'restock' ? matchExact(name, items) || matchItem(name, items)
       : matchItem(name, items, prefer);
     const m = find(a.name);
     if (/ and /.test(a.name) && !(m && m.coverage === 1)) {

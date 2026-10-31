@@ -1,4 +1,4 @@
-import { parseCommand, resolveActions, matchItem, guessLocation, parsePack, DEFAULT_LOCATIONS } from './parser.js';
+import { parseCommand, resolveActions, matchItem, matchExact, guessLocation, parsePack, DEFAULT_LOCATIONS } from './parser.js';
 
 const STORAGE_KEY = 'homestock.v1';
 const PREFS_KEY = 'homestock.prefs';
@@ -528,6 +528,28 @@ function applyActions(actions) {
         done.push(`🛒 ${it.name} added to the ${store ? `${store} ` : 'shopping '}list`);
         break;
       }
+      case 'restock': {
+        // "Move tomatoes from the list to the pantry": same as ticking it off in the Shop tab,
+        // then filed where you said. Not on the list? Then it's just moving where it's kept.
+        const listed = state.items.filter(isLow);
+        if (!it || !isLow(it)) it = matchExact(a.name, listed)?.item || matchItem(a.name, listed)?.item || it;
+        if (!it) { problems.push(`Couldn't find “${a.name}” on the list or in stock`); continue; }
+        if (isLow(it)) {
+          ui.bought.set(it.id, { qty: it.qty, need: it.need, listOnly: it.listOnly, location: it.location });
+          it.qty = a.qty != null ? round(it.qty + a.qty) : Math.max(it.qty + (it.scanQty || 1), (it.low ?? 0) + 1);
+          it.need = false;
+          if (a.location) it.location = a.location;
+          done.push(`✓ ${it.name} bought · ${qtyText(it)} in the ${it.location.toLowerCase()}`);
+        } else if (a.location && a.location !== it.location) {
+          it.location = a.location;
+          done.push(`${it.name} moved to the ${it.location.toLowerCase()}`);
+        } else {
+          problems.push(`${it.name} isn't on the shopping list${a.location ? ` and is already in the ${a.location.toLowerCase()}` : ''}`);
+          continue;
+        }
+        ui.flash = it.id;
+        break;
+      }
       case 'unlist':
         if (!it || !isLow(it)) { problems.push(`“${a.name}” isn't on the shopping list`); continue; }
         unlist(it);
@@ -904,7 +926,7 @@ function openVoice() {
         <button type="button">Removing a roll of paper towels</button><button type="button">Used 2 cans of tomatoes and a box of spaghetti</button>
         <button type="button">Bought a dozen eggs</button><button type="button">We're out of milk</button>
         <button type="button">How many rolls of toilet paper do we have?</button><button type="button">We have 3 rolls of duct tape</button>
-        <button type="button">Add coffee to the shopping list</button><button type="button">Take coffee off the list</button><button type="button">Add eggs to the Costco list</button>
+        <button type="button">Add coffee to the shopping list</button><button type="button">Take coffee off the list</button><button type="button">Add eggs to the Costco list</button><button type="button">Move tomatoes from the list to the pantry</button>
       </div>
     </div>`, () => {
     stopListening();
