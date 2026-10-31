@@ -70,7 +70,7 @@ const STOCK_WORDS = new Set([
   'storage', 'stash', 'house', 'home',
 ]);
 
-const TAIL = /^(.*\S)\s+(?:from|to|into|in|on|onto|at|off of|off|out of|back to|back in|back into)\s+(?:the |my |our |a )?([a-z' ]+)$/;
+const TAIL = /^(.*\S)\s+(from|to|into|in|on|onto|at|for|off of|off|out of|back to|back in|back into)\s+(?:the |my |our |a )?([a-z' ]+)$/;
 
 const numOf = (t) => {
   if (/^\d+(\.\d+)?$/.test(t)) return parseFloat(t);
@@ -85,7 +85,7 @@ function stripFiller(words) {
 
 function matchPhrase(s) {
   for (const [p, action] of PHRASES) {
-    if (s === p || s.startsWith(p + ' ')) return { action, rest: s.slice(p.length).trim() };
+    if (s === p || s.startsWith(p + ' ')) return { action, phrase: p, rest: s.slice(p.length).trim() };
   }
   return null;
 }
@@ -99,8 +99,7 @@ function startsNewClause(words) {
 export function parseCommand(text, opts = {}) {
   const locations = opts.locations || DEFAULT_LOCATIONS;
   const locByLower = new Map(locations.map((l) => [l.toLowerCase(), l]));
-  // Stores match without apostrophes, since speech often drops them ("trader joes").
-  const stores = new Map((opts.stores || []).map((st) => [storeKey(st), st]));
+  const ctx = { locByLower, stores: opts.stores || [], listContext: Boolean(opts.listContext) };
   const clean = String(text)
     .toLowerCase()
     .replace(/[’‘]/g, "'")
@@ -111,7 +110,7 @@ export function parseCommand(text, opts = {}) {
     .trim();
   if (!clean) return [];
 
-  const query = parseQuery(clean, locByLower, stores);
+  const query = parseQuery(clean, ctx);
   if (query) return [query];
 
   // Split into clauses on commas/"then", and on "and" only when what follows starts a new
@@ -134,7 +133,7 @@ export function parseCommand(text, opts = {}) {
   const actions = [];
   let prevAction = null;
   for (const clause of clauses) {
-    const a = parseClause(clause, prevAction, locByLower, stores);
+    const a = parseClause(clause, prevAction, ctx);
     if (!a) continue;
     prevAction = a.action;
     actions.push(a);
@@ -145,7 +144,7 @@ export function parseCommand(text, opts = {}) {
 // Questions don't change anything: "how many paper towels do we have", "do we have eggs".
 const QUESTION = /^(?:(?:hey|ok|okay|so|um|uh)\s+)*(?:how many|how much|do we have|do i have|do we still have|have we got|have i got|is there|are there|got any|where is|where are|where's|wheres|check on|check)\s+(.+)$/;
 
-function parseQuery(clean, locByLower, stores) {
+function parseQuery(clean, ctx) {
   const m = clean.match(QUESTION);
   if (!m) return null;
   const rest = m[1]
@@ -154,34 +153,87 @@ function parseQuery(clean, locByLower, stores) {
     .replace(/\s+(?:is|are)$/, '')
     .replace(/\s+/g, ' ')
     .trim();
-  const a = parseClause(rest, 'query', locByLower, stores);
+  const a = parseClause(rest, 'query', ctx);
   return a && { ...a, action: 'query', qty: null };
 }
 
-const storeKey = (s) => s.toLowerCase().replace(/'/g, '').trim();
+// Common chains, so a store can be recognised (and spelling-corrected) the first time it's
+// mentioned: speech hears "Jewel-Osco" as "jewel cosco" and "Costco" as "cosco".
+const KNOWN_STORES = [
+  ['Costco'], ['Aldi'], ['Target'], ['Walmart'], ['Jewel-Osco', 'jewel'], ["Trader Joe's", 'trader joes'],
+  ['Whole Foods', 'whole foods market'], ["Mariano's"], ["Sam's Club", 'sams'], ["BJ's"], ['Kroger'],
+  ['Safeway'], ['Publix'], ['Meijer'], ['H-E-B', 'heb'], ['Wegmans'], ['Sprouts'], ['Hy-Vee'],
+  ['Fresh Thyme'], ['Home Depot'], ["Lowe's"], ['Menards'], ['Walgreens'], ['CVS'], ['Amazon'],
+  ['Kohls'], ['Ace Hardware', 'ace'],
+];
+const squash = (s) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
 
-function parseClause(clause, prevAction, locByLower, stores = new Map()) {
+function editDistance(a, b) {
+  const row = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    let prev = row[0];
+    row[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const tmp = row[j];
+      row[j] = Math.min(row[j] + 1, row[j - 1] + 1, prev + (a[i - 1] === b[j - 1] ? 0 : 1));
+      prev = tmp;
+    }
+  }
+  return row[b.length];
+}
+
+// Your own stores first, then well-known chains; exact match first, then a near spelling.
+export function findStore(heard, stores = []) {
+  const h = squash(heard);
+  if (h.length < 3) return null;
+  const candidates = [...stores.map((st) => [st, [st]]), ...KNOWN_STORES.map(([name, ...aka]) => [name, [name, ...aka]])];
+  for (const [name, keys] of candidates) if (keys.some((k) => squash(k) === h)) return name;
+  let best = null;
+  let bestD = Infinity;
+  for (const [name, keys] of candidates) {
+    for (const k of keys) {
+      const kk = squash(k);
+      if (kk.length < 4) continue;
+      const d = editDistance(h, kk);
+      if (d <= (kk.length >= 8 ? 2 : 1) && d < bestD) {
+        best = name;
+        bestD = d;
+      }
+    }
+  }
+  return best;
+}
+
+// On the shopping list, "add bananas" means put them on the list, not into stock.
+const LIST_VERBS = new Set(['add', 'get', 'buy', 'put', 'pick up']);
+
+function parseClause(clause, prevAction, ctx = {}) {
+  const { locByLower = new Map(), stores = [], listContext = false } = ctx;
   let s = stripFiller(clause.split(' ')).join(' ');
   let action = null;
   const m = matchPhrase(s);
   if (m) {
-    action = m.action;
+    action = listContext && m.action === 'add' && LIST_VERBS.has(m.phrase) ? 'need' : m.action;
     s = m.rest;
   }
 
-  // Trailing "from the stock" / "in the garage" / "to the (Costco) shopping list" / "at Aldi".
+  // Trailing "from the stock" / "in the garage" / "to the (Costco) shopping list" /
+  // "to the shopping list for Jewel" / "at Aldi". A bare "to the shopping" is a list too:
+  // Safari sometimes cuts off the last word.
   let location = null;
   let store = null;
   for (let k = 0; k < 3; k++) {
     const t = s.match(TAIL);
     if (!t) break;
-    const tail = t[2].trim();
-    const list = tail.match(/^(?:(.+?) )?(?:shopping |grocery )?list$/);
+    const tail = t[3].trim();
+    const list = tail.match(/^(?:(.+?) )?(?:(?:shopping |grocery )?list|shopping|grocery)$/);
     if (list) {
       action = action === 'remove' || action === 'unlist' ? 'unlist' : 'need';
-      if (list[1] && stores.has(storeKey(list[1]))) store = stores.get(storeKey(list[1]));
-    } else if (stores.has(storeKey(tail))) store = stores.get(storeKey(tail));
-    else if (locByLower.has(tail)) location = locByLower.get(tail);
+      if (list[1]) store = findStore(list[1], stores) || store;
+    } else if (locByLower.has(tail)) location = locByLower.get(tail);
+    else if (findStore(tail, stores)) store = findStore(tail, stores);
+    // "…to the list for tomorrow": not a store, but the list part before it still counts.
+    else if (t[2] === 'for' && /\b(?:list|shopping|grocery)$/.test(t[1])) { /* drop it */ }
     else if (!STOCK_WORDS.has(tail)) break;
     s = t[1];
   }

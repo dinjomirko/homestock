@@ -98,6 +98,30 @@ test('stores: list for a store, and where something was bought', () => {
   assert.deepEqual(p('add milk to the list'), ['need', null, 'milk', undefined]);
 });
 
+test('store at the end, misheard store names, cut-off phrases', () => {
+  const stores = ['Costco', 'Aldi'];
+  const p = (t, opts = {}) => {
+    const r = parseCommand(t, { stores, ...opts });
+    assert.equal(r.length, 1, t);
+    return [r[0].action, r[0].name, r[0].store];
+  };
+  assert.deepEqual(p('add tomatoes to the shopping list for jewel cosco'), ['need', 'tomatoes', 'Jewel-Osco']);
+  assert.deepEqual(p('add tomatoes to the shopping list for Jewel'), ['need', 'tomatoes', 'Jewel-Osco']);
+  assert.deepEqual(p('add milk to the cosco list'), ['need', 'milk', 'Costco']);
+  assert.deepEqual(p('put eggs on the list at aldi'), ['need', 'eggs', 'Aldi']);
+  assert.deepEqual(p('add yogurt to the shopping'), ['need', 'yogurt', undefined]);
+  // Not a store: stays part of the request rather than inventing one.
+  assert.deepEqual(p('add milk to the list for tomorrow'), ['need', 'milk', undefined]);
+});
+
+test('on the shopping list, "add X" means put it on the list', () => {
+  assert.equal(one('add bananas').action, 'add');
+  assert.equal(parseCommand('add bananas', { listContext: true })[0].action, 'need');
+  assert.equal(parseCommand('get 2 boxes of cereal', { listContext: true })[0].action, 'need');
+  // Past tense still means you bought it.
+  assert.equal(parseCommand('bought bananas', { listContext: true })[0].action, 'add');
+});
+
 test('location at the end of a sentence', () => {
   const a = one('Took 2 cans of paint out of the garage');
   assert.deepEqual([a.action, a.qty, a.name, a.location], ['remove', 2, 'paint', 'Garage']);

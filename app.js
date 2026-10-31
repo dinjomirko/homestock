@@ -476,11 +476,18 @@ function applyActions(actions) {
         it.qty = 0;
         done.push(`${it.name} → out, added to shopping list`);
         break;
-      case 'need':
+      case 'need': {
         if (!it) create(0);
         it.need = true;
-        done.push(`🛒 ${it.name} added to shopping list`);
+        ui.bought.delete(it.id);
+        ui.flash = it.id;
+        // Asked for from a store's list: belongs to that store unless already tied to another.
+        const sel = shopStore();
+        if (!a.store && ui.view === 'shop' && sel !== 'all' && !it.store) it.store = sel;
+        const store = a.store || it.store;
+        done.push(`🛒 ${it.name} added to the ${store ? `${store} ` : 'shopping '}list`);
         break;
+      }
       case 'unlist':
         if (!it || !isLow(it)) { problems.push(`“${a.name}” isn't on the shopping list`); continue; }
         unlist(it);
@@ -488,7 +495,13 @@ function applyActions(actions) {
         continue;
     }
     if (a.unit && !it.unit) it.unit = a.unit;
-    if (a.store) it.store = a.store;
+    if (a.store) {
+      it.store = a.store;
+      if (!prefs.stores.includes(a.store)) {
+        prefs.stores.push(a.store);
+        savePrefs();
+      }
+    }
     it.updated = Date.now();
   }
   if (done.length) save();
@@ -511,7 +524,7 @@ function runCommand(texts) {
   const locations = allLocations();
   let best = null;
   for (const t of texts) {
-    const r = resolveActions(parseCommand(t, { locations, stores: allStores() }), state.items);
+    const r = resolveActions(parseCommand(t, { locations, stores: allStores(), listContext: ui.view === 'shop' && !ui.editor }), state.items);
     const score = r.filter((a) => a.action && (a.item || a.action !== 'remove')).length * 2 + r.filter((a) => a.item).length;
     if (r.length && (!best || score > best.score)) best = { r, score };
   }
@@ -839,7 +852,7 @@ let rec = null;
 function openVoice() {
   openSheet(`
     <div class="voice">
-      <div class="sheet-head"><h2>Say what changed</h2><button class="link" data-close>Done</button></div>
+      <div class="sheet-head"><h2>${ui.view === 'shop' ? 'What do you need?' : 'Say what changed'}</h2><button class="link" data-close>Done</button></div>
       <button id="micBtn" class="mic" aria-label="Start or stop listening" aria-pressed="false" ${SR ? '' : 'disabled'}>
         <svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
       </button>
