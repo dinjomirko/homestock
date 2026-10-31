@@ -689,51 +689,98 @@ function openVoice() {
   });
 }
 
+// iPhone Safari often keeps listening (and keeps the orange mic dot on) until the page
+// explicitly stops recognition, and may never mark a result final. So: stop after a short
+// pause in speech or 12s at most, use the last thing heard if nothing came back final, and
+// always abort at the end so the microphone is released.
 function startListening() {
   if (!SR) return;
   stopListening();
   window.speechSynthesis?.cancel();
+  audioCtx?.suspend().catch(() => {});
   const r = new SR();
   r.lang = navigator.language || 'en-US';
+  r.continuous = false;
   r.interimResults = true;
   r.maxAlternatives = 3;
-  rec = r;
+  let latest = null;
   let finals = null;
-  setMicUi(true);
-  $('#heard').textContent = 'Listening… tap the mic to stop';
+  let done = false;
+  let silenceTimer = 0;
+  let endTimer = 0;
+  const capTimer = setTimeout(() => session.stop(), 12000);
+
+  const release = () => {
+    clearTimeout(silenceTimer);
+    clearTimeout(endTimer);
+    clearTimeout(capTimer);
+    r.onresult = r.onerror = r.onend = null;
+    try { r.abort(); } catch {}
+    if (rec === session) rec = null;
+    setMicUi(false);
+  };
+  const finish = () => {
+    if (done) return;
+    done = true;
+    release();
+    const texts = finals || latest;
+    if (texts) handleCommand(texts, true);
+  };
+  const session = {
+    // Wrap up: ask for the final result, but don't wait long for Safari to deliver it.
+    stop() {
+      clearTimeout(silenceTimer);
+      try { r.stop(); } catch {}
+      clearTimeout(endTimer);
+      endTimer = setTimeout(finish, 1200);
+    },
+    // Abandon without acting on what was heard (typing, closing, leaving the app).
+    cancel() {
+      done = true;
+      release();
+    },
+  };
+  rec = session;
+
   r.onresult = (e) => {
     const results = Array.from(e.results);
     const head = results.slice(0, -1).map((x) => x[0].transcript).join(' ');
     const last = results.at(-1);
     $('#heard').textContent = `“${(head + ' ' + last[0].transcript).trim()}”`;
-    if (last.isFinal) finals = Array.from(last).map((alt) => (head + ' ' + alt.transcript).trim());
+    latest = Array.from(last).map((alt) => (head + ' ' + alt.transcript).trim());
+    if (last.isFinal) {
+      finals = latest;
+      session.stop();
+    } else {
+      clearTimeout(silenceTimer);
+      silenceTimer = setTimeout(() => session.stop(), 1500);
+    }
   };
   r.onerror = (e) => {
+    if (e.error === 'aborted') return;
     const heard = $('#heard');
-    if (!heard) return;
-    heard.textContent =
-      e.error === 'not-allowed' || e.error === 'service-not-allowed' ? 'Microphone access is blocked — you can type instead.'
-      : e.error === 'no-speech' ? 'Didn’t hear anything. Tap the mic to try again.'
-      : `Couldn’t listen (${e.error}). You can type instead.`;
+    if (heard) {
+      heard.textContent =
+        e.error === 'not-allowed' || e.error === 'service-not-allowed' ? 'Microphone access is blocked — you can type instead.'
+        : e.error === 'no-speech' ? 'Didn’t hear anything. Tap the mic to try again.'
+        : `Couldn’t listen (${e.error}). You can type instead.`;
+    }
+    latest = finals = null;
+    session.cancel();
   };
-  r.onend = () => {
-    setMicUi(false);
-    if (rec === r) rec = null;
-    if (finals) handleCommand(finals, true);
-  };
+  r.onend = finish;
+
+  setMicUi(true);
+  $('#heard').textContent = 'Listening… tap the mic to stop';
   try {
     r.start();
   } catch {
-    rec = null;
+    session.cancel();
   }
 }
 
 function stopListening() {
-  if (!rec) return;
-  rec.onend = rec.onresult = rec.onerror = null;
-  rec.abort();
-  rec = null;
-  setMicUi(false);
+  rec?.cancel();
 }
 
 function setMicUi(on) {
@@ -1030,6 +1077,7 @@ async function closeScanner() {
   cam.busy = false;
   cam.lastCode = '';
   $('#camera').srcObject = null;
+  audioCtx?.suspend().catch(() => {});
   $('#scanner').hidden = true;
   $('#scanCard').innerHTML = '';
   document.body.style.overflow = '';
@@ -1403,7 +1451,10 @@ document.addEventListener('keydown', (e) => {
 
 // Release the camera when the app goes to the background; pick it back up on return.
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden) stopListening();
+  if (document.hidden) {
+    stopListening();
+    audioCtx?.suspend().catch(() => {});
+  }
   if (document.hidden && cam.stream) {
     cam.running = false;
     cam.stream?.getTracks().forEach((t) => t.stop());
