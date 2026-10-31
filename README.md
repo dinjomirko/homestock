@@ -16,6 +16,8 @@ A tiny household inventory app: pantry, fridge, bathroom, garage. Built so keepi
 - **Paste a list** — paste lines from Notes, a text, or receipt text copied with Live Text; review the names and add them to stock or the shopping list at once.
 - **What can I cook?** — copies your kitchen contents as a question to paste into Claude or any recipe assistant.
 - **Photos** — scanned products bring their own; for anything else, tap the picture on the item's page to take or choose one (stored as a small thumbnail). Items without a photo show a matching emoji.
+- **Household sharing** — ⋯ → Household sharing: one phone starts a household and gets an 8-character code; others join with it (no accounts or passwords). Everyone sees the same stock, list, stores and places, live, and each item shows who changed it last. Works offline and catches up later. Backed by the Supabase project in `config.js`; set up with `supabase/schema.sql`.
+- **Hey Siri** — ⋯ → Set up "Hey Siri, Key Record" builds a Shortcut that dictates and opens `?say=…`, which runs the command.
 - Every change can be undone. Data stays on the device (localStorage); back up/restore from the ⋯ menu.
 
 No build step. Plain HTML/CSS/JS modules, installable to the home screen and usable offline.

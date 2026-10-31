@@ -67,6 +67,7 @@ create policy "members use settings" on public.household_settings for all
 create or replace function public.create_household(member_name text)
 returns table (household_id uuid, code text)
 language plpgsql security definer set search_path = public as $$
+#variable_conflict use_column
 declare
   h uuid;
   c text;
@@ -86,6 +87,7 @@ end $$;
 create or replace function public.join_household(join_code text, member_name text)
 returns table (household_id uuid, code text)
 language plpgsql security definer set search_path = public as $$
+#variable_conflict use_column
 declare
   h uuid;
 begin
