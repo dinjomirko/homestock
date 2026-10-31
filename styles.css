@@ -181,16 +181,21 @@ h2.group { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; co
 .backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, .4); z-index: 30; animation: fade .2s; }
 @keyframes fade { from { opacity: 0; } }
 .sheet {
-  position: fixed; left: 0; right: 0; bottom: 0; z-index: 31;
-  max-width: 600px; margin: 0 auto; max-height: 92vh; max-height: 92dvh; overflow-y: auto; overscroll-behavior: contain;
+  position: fixed; left: 0; right: 0; z-index: 31;
+  top: calc(var(--vv-top, 0px) + var(--vv-h, 100dvh)); transform: translateY(-100%);
+  max-width: 600px; margin: 0 auto; max-height: calc(var(--vv-h, 100dvh) - 24px); overflow-y: auto; overscroll-behavior: contain;
   background: var(--card); border-radius: 20px 20px 0 0; box-shadow: var(--shadow);
   padding: 8px 18px calc(20px + env(safe-area-inset-bottom));
   animation: up .22s cubic-bezier(.2, .8, .2, 1);
 }
-@keyframes up { from { transform: translateY(40px); opacity: 0; } }
+@keyframes up { from { translate: 0 40px; opacity: 0; } }
 .sheet::before { content: ""; display: block; width: 40px; height: 5px; border-radius: 3px; background: var(--line); margin: 0 auto 8px; }
 .sheet-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .sheet-head h2 { margin: 6px 0; font-size: 20px; }
+.sheet-head.sticky { position: sticky; top: -8px; z-index: 2; background: var(--card); margin: 0 -18px; padding: 0 18px; border-bottom: 1px solid var(--line); }
+.sheet-head.sticky h2 { font-size: 17px; }
+.link.strong { font-weight: 700; }
+.link.small { min-height: 0; padding: 0 0 0 4px; font-size: 13px; }
 .link { background: none; border: 0; color: var(--accent); font-weight: 600; min-height: 44px; padding: 8px 0; }
 
 .form label, .form .label { display: block; font-size: 13px; color: var(--muted); font-weight: 600; margin-top: 16px; }
@@ -214,6 +219,9 @@ h2.group { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; co
 .pick { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 .pick button { border: 1px solid var(--line); background: var(--bg); border-radius: 999px; min-height: 40px; padding: 6px 14px; font-size: 15px; }
 .pick button.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+.pick.scroll { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin-left: -14px; margin-right: -14px; padding: 0 14px 2px; }
+.pick.scroll::-webkit-scrollbar { display: none; }
+.pick.scroll button { flex: none; }
 
 .menu { display: flex; flex-direction: column; padding-bottom: 6px; }
 .menu button { text-align: left; background: none; border: 0; border-top: 1px solid var(--line); min-height: 52px; padding: 12px 4px; font-size: 16px; }
@@ -246,7 +254,7 @@ h2.group { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; co
 
 /* Scanner */
 .scanner {
-  position: fixed; inset: 0; z-index: 20; background: #000; color: #fff;
+  position: fixed; left: 0; right: 0; top: var(--vv-top, 0px); height: var(--vv-h, 100dvh); z-index: 20; background: #000; color: #fff;
   display: flex; flex-direction: column; gap: 10px;
   padding: calc(env(safe-area-inset-top) + 8px) 12px calc(env(safe-area-inset-bottom) + 10px);
 }
@@ -279,22 +287,33 @@ h2.group { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; co
 /* Card under the camera: last scan result, or the quick-add form */
 .scan-card:empty { display: none; }
 .scan-card {
-  background: var(--card); color: var(--ink); border-radius: 18px; padding: 14px;
+  background: var(--card); color: var(--ink); border-radius: 18px; padding: 14px 14px 0;
   max-height: 62vh; max-height: 62dvh; overflow-y: auto; animation: up .2s ease-out;
 }
-.scanner:has(.scan-card .quick) .viewfinder { flex: 0 0 150px; }
+.scanner:has(.scan-card .quick) .viewfinder { flex: 1 1 130px; min-height: 110px; }
+
+/* Keyboard open: drop the camera and spare chrome so the form and Save fit above it. */
+.kb-open .scanner { gap: 8px; padding-bottom: 8px; }
+.kb-open .scanner .viewfinder, .kb-open .scanner .type-code { display: none; }
+.kb-open .scan-card { flex: 1; max-height: none; }
+.kb-open .scanner .scan-manual { margin-top: auto; }
+.kb-open .sheet { padding-bottom: 12px; border-radius: 16px 16px 0 0; }
 .result { display: flex; align-items: center; gap: 12px; }
 .result .thumb { width: 52px; height: 52px; }
 .result .info { padding: 0; }
 .result .delta { font-size: 13px; font-weight: 700; color: var(--accent); }
 .result .delta.minus { color: var(--warn); }
-.result-actions { display: flex; gap: 8px; margin-top: 10px; }
+.result-actions { display: flex; gap: 8px; margin-top: 10px; padding-bottom: 14px; }
 .result-actions .btn { flex: 1; min-height: 40px; padding: 8px; font-size: 14px; background: var(--bg); }
 .quick h3 { margin: 0; font-size: 17px; }
 .quick .top-row { display: flex; gap: 12px; align-items: center; }
 .quick .top-row img, .quick .top-row .thumb { width: 56px; height: 56px; border-radius: 10px; object-fit: cover; flex: none; background: var(--bg); }
 .quick input[name="name"] { margin-top: 0; font-weight: 600; }
-.quick .row-actions { display: flex; gap: 10px; margin-top: 16px; }
+.quick .row-actions { display: flex; gap: 10px; position: sticky; bottom: 0; z-index: 1; background: var(--card); margin-top: 14px; padding: 10px 0 14px; }
+.quick .label { margin-top: 12px; }
+.qty-row { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
+.qty-row .stepper.big { flex: none; width: 132px; margin: 0; }
+.qty-row .pick.scroll { flex: 1; min-width: 0; margin: 0 -14px 0 0; padding: 0 14px 0 0; }
 .quick .row-actions .btn { flex: 1; min-height: 50px; }
 .quick .primary { margin-top: 0; }
 .suggest { margin-top: 12px; padding: 10px 12px; border-radius: 12px; background: var(--accent-soft); display: flex; align-items: center; gap: 10px; font-size: 14px; }

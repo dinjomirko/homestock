@@ -415,30 +415,40 @@ function toast(msg, { undo: withUndo = false } = {}) {
   toastTimer = setTimeout(() => (t.hidden = true), withUndo ? 6000 : 2500);
 }
 
-function locationPicker(current) {
-  const locs = allLocations();
-  if (!locs.includes(current)) locs.push(current);
-  return `<input type="hidden" name="location" value="${esc(current)}">
-    <div class="pick" role="radiogroup" aria-label="Kept in">${locs
-      .map((l) => `<button type="button" role="radio" data-pick-loc="${esc(l)}" class="${l === current ? 'on' : ''}" aria-checked="${l === current}">${esc(l)}</button>`)
-      .join('')}<button type="button" data-pick-loc="__new">+ New place</button></div>`;
+const UNIT_CHOICES = ['', 'can', 'box', 'bottle', 'bag', 'jar', 'roll', 'pack'];
+
+// A row of tap-to-pick chips backed by a hidden input, so common answers need no typing.
+function chipPicker(field, options, current, { label, other, scroll = false, text = (v) => v } = {}) {
+  const opts = options.includes(current) ? options : [...options, current];
+  return `<input type="hidden" name="${field}" value="${esc(current)}">
+    <div class="pick ${scroll ? 'scroll' : ''}" role="radiogroup" aria-label="${esc(label)}">${opts
+      .map((v) => `<button type="button" role="radio" data-pick="${field}" data-value="${esc(v)}" class="${v === current ? 'on' : ''}" aria-checked="${v === current}">${esc(text(v))}</button>`)
+      .join('')}${other ? `<button type="button" data-pick="${field}" data-value="__new" data-ask="${esc(other.ask)}">${esc(other.label)}</button>` : ''}</div>`;
 }
 
-// Location chips inside any form: pick one, or name a new place.
+const locationPicker = (current, scroll) =>
+  chipPicker('location', allLocations(), current, { label: 'Kept in', scroll, other: { label: '+ New place', ask: 'Name the new place (e.g. Basement, Laundry room)' } });
+
+const unitPicker = (current) =>
+  chipPicker('unit', UNIT_CHOICES, current, { label: 'Counted in', scroll: true, text: (v) => v || 'each', other: { label: 'Other…', ask: 'Counted in what? (e.g. tube, carton, pound)' } });
+
 document.addEventListener('click', (e) => {
-  const b = e.target.closest('[data-pick-loc]');
+  const b = e.target.closest('[data-pick]');
   if (!b) return;
-  const form = b.closest('form');
-  let loc = b.dataset.pickLoc;
-  if (loc === '__new') {
-    loc = prompt('Name the new place (e.g. Basement, Laundry room)')?.trim();
-    if (!loc) return;
-    loc = sentenceCase(loc);
-    b.insertAdjacentHTML('beforebegin', `<button type="button" role="radio" data-pick-loc="${esc(loc)}">${esc(loc)}</button>`);
+  const group = b.closest('.pick');
+  const field = b.dataset.pick;
+  let value = b.dataset.value;
+  if (value === '__new') {
+    value = prompt(b.dataset.ask)?.trim();
+    if (!value) return;
+    value = field === 'unit' ? singularUnit(value) : sentenceCase(value);
+    if (!group.querySelector(`[data-value="${CSS.escape(value)}"]`)) {
+      b.insertAdjacentHTML('beforebegin', `<button type="button" role="radio" data-pick="${field}" data-value="${esc(value)}">${esc(value)}</button>`);
+    }
   }
-  form.location.value = loc;
-  form.querySelectorAll('[data-pick-loc]').forEach((x) => {
-    const on = x.dataset.pickLoc === loc;
+  b.closest('form')[field].value = value;
+  group.querySelectorAll('[data-value]').forEach((x) => {
+    const on = x.dataset.value === value;
     x.classList.toggle('on', on);
     x.setAttribute('aria-checked', on);
   });
@@ -451,10 +461,10 @@ function openEditor(item, { isNew = false, hint = '' } = {}) {
     const lowOpts = [['', 'Never'], ...[0, 1, 2, 3, 5, 10].map((n) => [n, n === 0 ? 'When out' : `${n} left`])];
     openSheet(`
       <form class="form" id="editForm">
-        <div class="sheet-head"><h2>${isNew ? 'New item' : 'Edit item'}</h2><button type="button" class="link" data-close>Cancel</button></div>
+        <div class="sheet-head sticky"><button type="button" class="link" data-close>Cancel</button><h2>${isNew ? 'New item' : 'Edit item'}</h2><button type="submit" class="link strong">${isNew ? 'Add' : 'Save'}</button></div>
         ${hint ? `<p class="note">${esc(hint)}</p>` : ''}
         ${item.image ? `<img class="hero" src="${esc(item.image)}" alt="">` : ''}
-        <label>Name<input name="name" required value="${esc(item.name)}" placeholder="e.g. Paper towels" autocomplete="off"></label>
+        <label>Name<input name="name" required value="${esc(item.name)}" placeholder="e.g. Paper towels" autocomplete="off" enterkeyhint="done"></label>
         <div class="row2">
           <label>How many
             <div class="stepper big"><button type="button" data-step="-1" aria-label="One less">−</button><input name="qty" type="number" inputmode="decimal" step="any" min="0" value="${item.qty}" aria-label="Quantity"><button type="button" data-step="1" aria-label="One more">+</button></div>
@@ -474,7 +484,6 @@ function openEditor(item, { isNew = false, hint = '' } = {}) {
           <label>Brand<input name="brand" value="${esc(item.brand)}" autocomplete="off"></label>
           <label>Barcode<input name="barcode" inputmode="numeric" value="${esc(item.barcode)}" autocomplete="off"></label>
         </details>
-        <button class="primary" type="submit">${isNew ? 'Add item' : 'Save'}</button>
         ${isNew ? '' : `<button type="button" class="danger" data-delete>Delete item</button>
           <p class="note" style="text-align:center">Last changed ${ago(item.updated)}</p>`}
       </form>`, () => resolve(saved));
@@ -506,6 +515,7 @@ function openEditor(item, { isNew = false, hint = '' } = {}) {
         barcode: normCode(form.barcode.value),
         updated: Date.now(),
       });
+      document.activeElement?.blur();
       if (item.qty > (item.low ?? -1)) item.need = false;
       if (isNew) state.items.push(item);
       saved = item;
@@ -1091,25 +1101,24 @@ async function quickAdd(code) {
       <div class="top-row">
         ${draft.image ? `<img src="${esc(draft.image)}" alt="">` : '<div class="thumb" aria-hidden="true">📦</div>'}
         <div style="flex:1;min-width:0">
-          <input name="name" value="${esc(draft.name)}" placeholder="What is it?" required autocomplete="off" aria-label="Name">
-          <p class="note">${info ? esc(found) : 'Not in the product databases — name it once and it’s remembered.'}</p>
+          <input name="name" value="${esc(draft.name)}" placeholder="What is it?" required autocomplete="off" enterkeyhint="done" aria-label="Name">
+          <p class="note">${info ? esc(found) : 'Not found online — name it once and it’s remembered.'}
+            <button type="button" class="link small" data-quick="more">More details</button></p>
         </div>
       </div>
       ${similar ? `<div class="suggest"><span>Is this your <b>${esc(similar.name)}</b>?</span>
         <button type="button" class="btn small primary" data-quick="link" data-id="${similar.id}">Yes, same thing</button></div>` : ''}
       <span class="label">Kept in</span>
-      ${locationPicker(draft.location)}
-      <div class="row2">
-        <label>How many
-          <div class="stepper big"><button type="button" data-step="-1" aria-label="One less">−</button><input name="qty" type="number" inputmode="decimal" min="0" step="any" value="${draft.qty}" aria-label="Quantity"><button type="button" data-step="1" aria-label="One more">+</button></div>
-        </label>
-        <label>Counted in<input name="unit" value="${esc(draft.unit)}" placeholder="rolls, cans…" autocapitalize="off" autocomplete="off"></label>
+      ${locationPicker(draft.location, true)}
+      <span class="label">How many</span>
+      <div class="qty-row">
+        <div class="stepper big"><button type="button" data-step="-1" aria-label="One less">−</button><input name="qty" type="number" inputmode="decimal" min="0" step="any" value="${draft.qty}" aria-label="Quantity"><button type="button" data-step="1" aria-label="One more">+</button></div>
+        ${unitPicker(draft.unit)}
       </div>
       <div class="row-actions">
         <button type="button" class="btn" data-quick="skip">Skip</button>
         <button class="btn primary">Save</button>
       </div>
-      <button type="button" class="link" data-quick="more" style="width:100%">More details (use-by date, brand…)</button>
     </form>`;
   const form = $('#quickForm');
   if (!info) form.name.focus();
@@ -1206,6 +1215,7 @@ $('#scanCard').addEventListener('submit', (e) => {
   e.preventDefault();
   const item = readQuickForm(e.target);
   if (!item.name) return e.target.name.focus();
+  document.activeElement?.blur();
   checkpoint();
   state.items.push(item);
   save();
@@ -1412,6 +1422,30 @@ document.addEventListener('visibilitychange', () => {
     startCamera().catch(() => showManual());
   }
 });
+
+// iOS shrinks only the visual viewport when the keyboard opens; fixed panels sized to the
+// full screen would leave Save hidden behind the keyboard. Size them to what's visible.
+let tallestView = 0;
+function syncViewport() {
+  const vv = window.visualViewport;
+  const h = vv ? vv.height : window.innerHeight;
+  tallestView = Math.max(tallestView, h);
+  const root = document.documentElement;
+  root.style.setProperty('--vv-h', `${h}px`);
+  root.style.setProperty('--vv-top', `${vv ? vv.offsetTop : 0}px`);
+  const typing = document.activeElement?.matches?.('input:not([type=hidden]):not([type=checkbox]), textarea, select');
+  root.classList.toggle('kb-open', Boolean(typing) && h < tallestView * 0.8);
+}
+window.visualViewport?.addEventListener('resize', syncViewport);
+window.visualViewport?.addEventListener('scroll', syncViewport);
+window.addEventListener('resize', syncViewport);
+window.addEventListener('orientationchange', () => {
+  tallestView = 0;
+  setTimeout(syncViewport, 400);
+});
+document.addEventListener('focusin', () => setTimeout(syncViewport, 60));
+document.addEventListener('focusout', () => setTimeout(syncViewport, 60));
+syncViewport();
 
 if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
   navigator.serviceWorker.register('sw.js').catch(() => {});
