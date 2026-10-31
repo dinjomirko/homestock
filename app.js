@@ -668,7 +668,7 @@ function openVoice() {
   openSheet(`
     <div class="voice">
       <div class="sheet-head"><h2>Say what changed</h2><button class="link" data-close>Done</button></div>
-      <button id="micBtn" class="mic" aria-label="Start or stop listening">
+      <button id="micBtn" class="mic" aria-label="Start or stop listening" aria-pressed="false" ${SR ? '' : 'disabled'}>
         <svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
       </button>
       <p id="heard" class="heard">${SR ? 'Tap the mic and talk' : 'Voice isn’t supported in this browser — type it instead'}</p>
@@ -687,10 +687,10 @@ function openVoice() {
     stopListening();
     window.speechSynthesis?.cancel();
   });
-  if (SR) startListening();
 }
 
 function startListening() {
+  if (!SR) return;
   stopListening();
   window.speechSynthesis?.cancel();
   const r = new SR();
@@ -699,8 +699,8 @@ function startListening() {
   r.maxAlternatives = 3;
   rec = r;
   let finals = null;
-  $('#micBtn')?.classList.add('live');
-  $('#heard').textContent = 'Listening…';
+  setMicUi(true);
+  $('#heard').textContent = 'Listening… tap the mic to stop';
   r.onresult = (e) => {
     const results = Array.from(e.results);
     const head = results.slice(0, -1).map((x) => x[0].transcript).join(' ');
@@ -717,7 +717,7 @@ function startListening() {
       : `Couldn’t listen (${e.error}). You can type instead.`;
   };
   r.onend = () => {
-    $('#micBtn')?.classList.remove('live');
+    setMicUi(false);
     if (rec === r) rec = null;
     if (finals) handleCommand(finals, true);
   };
@@ -733,6 +733,16 @@ function stopListening() {
   rec.onend = rec.onresult = rec.onerror = null;
   rec.abort();
   rec = null;
+  setMicUi(false);
+}
+
+function setMicUi(on) {
+  const mic = $('#micBtn');
+  if (!mic) return;
+  mic.classList.toggle('live', on);
+  mic.setAttribute('aria-pressed', String(on));
+  const heard = $('#heard');
+  if (!on && heard?.textContent.startsWith('Listening')) heard.textContent = 'Tap the mic and talk';
 }
 
 function say(text) {
@@ -1351,6 +1361,10 @@ $('#sheet').addEventListener('click', (e) => {
   }
 });
 
+$('#sheet').addEventListener('focusin', (e) => {
+  if (e.target.id === 'typeInput') stopListening();
+});
+
 $('#sheet').addEventListener('submit', (e) => {
   if (e.target.id !== 'typeForm') return;
   e.preventDefault();
@@ -1389,6 +1403,7 @@ document.addEventListener('keydown', (e) => {
 
 // Release the camera when the app goes to the background; pick it back up on return.
 document.addEventListener('visibilitychange', () => {
+  if (document.hidden) stopListening();
   if (document.hidden && cam.stream) {
     cam.running = false;
     cam.stream?.getTracks().forEach((t) => t.stop());
