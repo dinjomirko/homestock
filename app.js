@@ -1,4 +1,4 @@
-import { parseCommand, resolveActions, matchItem, matchExact, guessLocation, parsePack, DEFAULT_LOCATIONS } from './parser.js';
+import { parseCommand, resolveActions, matchItem, matchExact, guessLocation, guessEmoji, parsePack, DEFAULT_LOCATIONS } from './parser.js';
 
 const STORAGE_KEY = 'homestock.v1';
 const PREFS_KEY = 'homestock.prefs';
@@ -45,7 +45,9 @@ function save() {
   }
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  } catch {}
+  } catch {
+    setTimeout(() => toast('Couldn’t save — this phone’s storage for Homestock is full. Remove some photos, or back up from the ⋯ menu.'), 0);
+  }
   // Ask the browser not to clear this data when space runs low.
   if (!persistAsked) {
     persistAsked = true;
@@ -164,7 +166,7 @@ function render() {
 }
 
 function thumb(it, asButton = true) {
-  const inner = it.image ? `<img src="${esc(it.image)}" alt="" loading="lazy">` : `<span class="mono">${esc((it.name || '?').charAt(0).toUpperCase())}</span>`;
+  const inner = it.image ? `<img src="${esc(it.image)}" alt="" loading="lazy">` : `<span class="emoji">${guessEmoji(it.name, it.location)}</span>`;
   return asButton
     ? `<button class="thumb" data-act="edit" aria-label="Edit ${esc(it.name)}">${inner}</button>`
     : `<div class="thumb" aria-hidden="true">${inner}</div>`;
@@ -676,6 +678,7 @@ function openEditor(item, opts = {}) {
   return new Promise((resolve) => {
     if (ui.editor) ui.editor.resolve(null);
     ui.editor = { item, ...opts, resolve, scrollY: window.scrollY };
+    $('#toast').hidden = true; // a message from before would sit over the page's buttons
     render();
     $('#main').innerHTML = renderEditor();
     window.scrollTo(0, 0);
@@ -692,6 +695,47 @@ function closeEditor(saved = null) {
   ed.resolve(saved);
 }
 
+const photoTile = (image, item) =>
+  image ? `<img src="${esc(image)}" alt="">` : `<span class="emoji">${guessEmoji(item.name, item.location)}</span><span class="cam">📷</span>`;
+const photoButtons = (has) =>
+  `<button type="button" class="link" data-edit="photo">${has ? 'Change photo' : 'Add photo'}</button>${has ? '<button type="button" class="link quiet" data-edit="nophoto">Remove</button>' : ''}`;
+
+// Take or choose a picture (iOS offers camera or library) and shrink it to a small square
+// thumbnail, so photos don't fill up the browser's storage.
+function pickPhoto() {
+  return new Promise((resolve) => {
+    const input = Object.assign(document.createElement('input'), { type: 'file', accept: 'image/*' });
+    input.addEventListener('change', () => resolve(input.files?.[0] || null), { once: true });
+    input.click();
+  });
+}
+
+async function shrinkPhoto(file, size = 192) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((res, rej) => {
+      const i = new Image();
+      i.onload = () => res(i);
+      i.onerror = rej;
+      i.src = url;
+    });
+    const side = Math.min(img.naturalWidth, img.naturalHeight);
+    const c = Object.assign(document.createElement('canvas'), { width: size, height: size });
+    c.getContext('2d').drawImage(img, (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side, 0, 0, size, size);
+    return c.toDataURL('image/jpeg', 0.72);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+function showEditorPhoto(form) {
+  const ed = ui.editor;
+  const image = ed.photo !== undefined ? ed.photo : ed.item.image;
+  const preview = { ...ed.item, name: form.name.value || ed.item.name, location: form.location.value };
+  form.querySelector('.photo-tile').innerHTML = photoTile(image, preview);
+  form.querySelector('.photo-actions').innerHTML = photoButtons(Boolean(image));
+}
+
 function renderEditor() {
   const { item, isNew, hint, similar, fromScan } = ui.editor;
   const lowOpts = [['', 'Never'], ...[0, 1, 2, 3, 5, 10].map((n) => [n, n === 0 ? 'When out' : `${n} left`])];
@@ -701,7 +745,13 @@ function renderEditor() {
       <h2>${isNew ? 'New item' : 'Edit item'}</h2>
       <button type="submit" class="link strong">Save</button>
     </div>
-    ${item.image || hint ? `<div class="found">${item.image ? `<img src="${esc(item.image)}" alt="">` : ''}${hint ? `<p class="note">${esc(hint)}</p>` : ''}</div>` : ''}
+    <div class="photo-row">
+      <button type="button" class="photo-tile" data-edit="photo" aria-label="${item.image ? 'Change photo' : 'Add a photo'}">${photoTile(item.image, item)}</button>
+      <div class="photo-side">
+        ${hint ? `<p class="note">${esc(hint)}</p>` : ''}
+        <div class="photo-actions">${photoButtons(Boolean(item.image))}</div>
+      </div>
+    </div>
     ${similar ? `<div class="suggest"><span>Is this your <b>${esc(similar.name)}</b>?</span>
       <button type="button" class="btn small primary" data-edit="link" data-id="${similar.id}">Yes, same thing</button></div>` : ''}
     <label>Name<input name="name" value="${esc(item.name)}" placeholder="What is it?" autocomplete="off" enterkeyhint="done"></label>
@@ -740,10 +790,33 @@ $('#main').addEventListener('click', (e) => {
   const act = e.target.closest('[data-edit]')?.dataset.edit;
   if (act === 'cancel') closeEditor(null);
   if (act === 'link') linkScannedTo(byId(e.target.closest('[data-id]').dataset.id));
+  // The new photo is kept aside until Save, so Cancel throws it away.
+  if (act === 'photo') {
+    pickPhoto().then(async (file) => {
+      if (!file || !ui.editor) return;
+      try {
+        ui.editor.photo = await shrinkPhoto(file);
+        showEditorPhoto(form);
+      } catch {
+        toast('Couldn’t read that picture — try another one.');
+      }
+    });
+  }
+  if (act === 'nophoto') {
+    ui.editor.photo = '';
+    showEditorPhoto(form);
+  }
+  // The emoji placeholder follows the name and place as you edit them.
+  if (e.target.closest('[data-pick="location"]') && ui.editor.photo === undefined && !item.image) setTimeout(() => ui.editor && showEditorPhoto(form));
   if (act === 'delete' && confirm(`Delete ${item.name}?`)) {
     closeEditor(null);
     deleteItem(item);
   }
+});
+
+$('#main').addEventListener('input', (e) => {
+  const form = e.target.closest('#editForm');
+  if (form && e.target.name === 'name' && ui.editor && ui.editor.photo === undefined && !ui.editor.item.image) showEditorPhoto(form);
 });
 
 $('#main').addEventListener('submit', (e) => {
@@ -772,6 +845,7 @@ $('#main').addEventListener('submit', (e) => {
     barcode: normCode(form.barcode.value),
     updated: Date.now(),
   });
+  if (ui.editor.photo !== undefined) item.image = ui.editor.photo;
   // Restocking clears a list request; just editing other details doesn't.
   if (item.qty > qtyBefore && item.qty > (item.low ?? -1)) item.need = false;
   if (item.store && !prefs.stores.includes(item.store)) {

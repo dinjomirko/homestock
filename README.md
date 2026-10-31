@@ -11,6 +11,7 @@ A tiny household inventory app: pantry, fridge, bathroom, garage. Built so keepi
 - **Share to Notes** — Share sends the list (or one store's list) as one item per line. In the Notes share card, choose which note to add it to; in the note, select the lines and tap the checklist button to make them checkable. (Notes doesn't let other apps create checkboxes directly.)
 - **Use by** — optional dates; a "Use soon" filter shows what to eat first, and the recipe question lists those first.
 - **What can I cook?** — copies your kitchen contents as a question to paste into Claude or any recipe assistant.
+- **Photos** — scanned products bring their own; for anything else, tap the picture on the item's page to take or choose one (stored as a small thumbnail). Items without a photo show a matching emoji.
 - Every change can be undone. Data stays on the device (localStorage); back up/restore from the ⋯ menu.
 
 No build step. Plain HTML/CSS/JS modules, installable to the home screen and usable offline.

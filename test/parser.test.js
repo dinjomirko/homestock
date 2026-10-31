@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseCommand, resolveActions, matchItem, guessLocation, parsePack } from '../parser.js';
+import { parseCommand, resolveActions, matchItem, guessLocation, parsePack, guessEmoji } from '../parser.js';
 
 const one = (text) => {
   const r = parseCommand(text);
@@ -201,4 +201,17 @@ test('guessing location and pack size', () => {
   assert.deepEqual(parsePack('12 Mega Rolls'), { count: 12, unit: 'roll' });
   assert.deepEqual(parsePack('4 bars'), { count: 4, unit: 'bar' });
   assert.equal(parsePack('500 g'), null);
+});
+
+test('emoji placeholders', () => {
+  for (const [name, emoji] of [
+    ['Diced tomatoes', '🍅'], ['Paper towels', '🧻'], ['Toilet paper', '🧻'], ['Milk', '🥛'], ['Sour cream', '🥛'],
+    ['Cheddar cheese', '🧀'], ['Eggs', '🥚'], ['Eggplant', '🍆'], ['Toothpaste', '🪥'], ['Shampoo', '🧴'],
+    ['AA batteries', '🔋'], ['Wood screws 1-5/8"', '🔩'], ['Duct tape', '🧰'], ['Black beans', '🫘'], ['Frozen peas', '🫛'],
+    ['Olive oil', '🫒'], ['Spaghetti', '🍝'], ['Coffee', '☕'], ['Peanut butter', '🥜'], ['Dog food', '🐶'],
+  ]) assert.equal(guessEmoji(name), emoji, name);
+  assert.equal(guessEmoji('Furnace filter 16x25x1'), '🧰');
+  assert.equal(guessEmoji('Mystery thing', 'Garage'), '🧰');
+  assert.equal(guessEmoji('Mystery thing', 'Fridge'), '🧊');
+  assert.equal(guessEmoji('Mystery thing'), '📦');
 });

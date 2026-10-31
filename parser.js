@@ -396,6 +396,87 @@ export function guessLocation(text, kind = '') {
   return 'Pantry';
 }
 
+// A picture for items without a photo. Specific phrases come before the words inside them
+// ("sour cream" before "cream", "toothbrush" before "brush"); otherwise, where it's kept.
+const EMOJI_HINTS = [
+  [/\b(paper towels?|toilet paper|tissues?|napkins?|kleenex)\b/, '🧻'],
+  [/\b(peanut butter|peanuts?|almonds?|cashews?|walnuts?|pecans?|nuts)\b/, '🥜'],
+  [/\b(dog food|dog treats?|kibble|dog)\b/, '🐶'],
+  [/\b(cat food|cat litter|litter|cat)\b/, '🐱'],
+  [/\b(ice cream|gelato|popsicles?)\b/, '🍨'],
+  [/\b(light ?bulbs?|bulbs?)\b/, '💡'],
+  [/\b(trash bags?|garbage bags?|bin bags?)\b/, '🗑️'],
+  [/\b(dish soap|dishwasher|detergent|laundry|bleach|fabric softener|dryer sheets?)\b/, '🧺'],
+  [/\b(sponges?|scrubbers?)\b/, '🧽'],
+  [/\b(toothpaste|toothbrush(es)?|floss|mouthwash)\b/, '🪥'],
+  [/\b(sour cream|cream cheese|heavy cream|whipped cream|creamer|half and half|milk|yogh?urt|kefir)\b/, '🥛'],
+  [/\b(soap|hand wash|body wash)\b/, '🧼'],
+  [/\b(shampoo|conditioner|lotion|sunscreen|deodorant|moisturi[sz]er|cream)\b/, '🧴'],
+  [/\b(razors?|shaving)\b/, '🪒'],
+  [/\b(bandages?|band aids?|first aid)\b/, '🩹'],
+  [/\b(vitamins?|medicine|pills?|tylenol|advil|ibuprofen|aspirin|allergy)\b/, '💊'],
+  [/\b(diapers?|baby wipes|wipes)\b/, '👶'],
+  [/\b(batter(y|ies))\b/, '🔋'],
+  [/\b(screws?|bolts?|washers?|anchors?|hooks?)\b/, '🔩'],
+  [/\b(nails?|hammer)\b/, '🔨'],
+  [/\b(paint|primer|stain|brush(es)?|rollers?)\b/, '🎨'],
+  [/\b(lumber|wood|plywood|boards?|mulch)\b/, '🪵'],
+  [/\b(gloves?)\b/, '🧤'],
+  [/\b(candles?)\b/, '🕯️'],
+  [/\b(charcoal|propane|firewood)\b/, '🔥'],
+  [/\b(tape|glue|caulk|sealant|spackle|wd ?40|filters?|fuses?|wire|zip ties?|tools?)\b/, '🧰'],
+  [/\b(tomato(es)?|marinara|salsa)\b/, '🍅'],
+  [/\b(eggplants?)\b/, '🍆'],
+  [/\b(eggs?)\b/, '🥚'],
+  [/\b(cheese|cheddar|mozzarella|parmesan|swiss|provolone)\b/, '🧀'],
+  [/\b(butter|margarine)\b/, '🧈'],
+  [/\b(croissants?|pastr(y|ies))\b/, '🥐'],
+  [/\b(bread|bagels?|buns?|tortillas?|loaf|english muffins?)\b/, '🍞'],
+  [/\b(pasta|spaghetti|noodles?|macaroni|penne|lasagna|linguine)\b/, '🍝'],
+  [/\b(rice)\b/, '🍚'],
+  [/\b(peas|snap peas)\b/, '🫛'],
+  [/\b(beans?|lentils?|chickpeas?)\b/, '🫘'],
+  [/\b(olive oil|olives?|oil|vinegar)\b/, '🫒'],
+  [/\b(flour|oats?|oatmeal|quinoa)\b/, '🌾'],
+  [/\b(cereal|granola)\b/, '🥣'],
+  [/\b(honey|syrup)\b/, '🍯'],
+  [/\b(coffee|espresso|k cups?)\b/, '☕'],
+  [/\b(tea)\b/, '🍵'],
+  [/\b(juice|juice boxes)\b/, '🧃'],
+  [/\b(water|seltzer|la croix)\b/, '💧'],
+  [/\b(soda|cola|coke|pepsi|sprite|ginger ale)\b/, '🥤'],
+  [/\b(beer|ale|lager|ipa)\b/, '🍺'],
+  [/\b(wine)\b/, '🍷'],
+  [/\b(chicken|turkey)\b/, '🍗'],
+  [/\b(bacon|ham|sausages?|hot dogs?|pepperoni|salami)\b/, '🥓'],
+  [/\b(beef|steak|pork|meat|burgers?|lamb)\b/, '🥩'],
+  [/\b(fish|salmon|tuna|shrimp|cod|tilapia|seafood)\b/, '🐟'],
+  [/\b(apples?)\b/, '🍎'], [/\b(bananas?)\b/, '🍌'], [/\b(oranges?|clementines?|mandarins?)\b/, '🍊'],
+  [/\b(lemons?|limes?)\b/, '🍋'], [/\b(grapes?|raisins?)\b/, '🍇'], [/\b(strawberr(y|ies)|jam|jelly)\b/, '🍓'],
+  [/\b(blueberr(y|ies)|berries)\b/, '🫐'], [/\b(peach(es)?)\b/, '🍑'], [/\b(pears?)\b/, '🍐'],
+  [/\b(cherr(y|ies))\b/, '🍒'], [/\b(watermelons?|melons?)\b/, '🍉'], [/\b(pineapples?)\b/, '🍍'],
+  [/\b(mangos?|mangoes)\b/, '🥭'], [/\b(avocados?|guacamole)\b/, '🥑'], [/\b(coconuts?)\b/, '🥥'],
+  [/\b(carrots?)\b/, '🥕'], [/\b(potato(es)?|fries|hash browns?)\b/, '🥔'], [/\b(onions?|shallots?)\b/, '🧅'],
+  [/\b(garlic)\b/, '🧄'], [/\b(lettuce|spinach|kale|greens|salad|cabbage|arugula)\b/, '🥬'], [/\b(broccoli|cauliflower)\b/, '🥦'],
+  [/\b(bell peppers?|peppers?)\b/, '🫑'], [/\b(cucumbers?|pickles?|zucchini)\b/, '🥒'], [/\b(corn)\b/, '🌽'],
+  [/\b(mushrooms?)\b/, '🍄'],
+  [/\b(salt|spices?|cinnamon|paprika|cumin|oregano|seasoning)\b/, '🧂'],
+  [/\b(sugar|candy|candies|gummies)\b/, '🍬'],
+  [/\b(chips|crackers|pretzels|popcorn|snacks?)\b/, '🥨'],
+  [/\b(cookies?|biscuits?)\b/, '🍪'], [/\b(chocolate|cocoa)\b/, '🍫'], [/\b(cakes?|cupcakes?|muffins?)\b/, '🧁'],
+  [/\b(pies?)\b/, '🥧'], [/\b(donuts?|doughnuts?)\b/, '🍩'], [/\b(pizza)\b/, '🍕'],
+  [/\b(soup|broth|stock|chili)\b/, '🍲'],
+  [/\b(ketchup|mustard|mayo|mayonnaise|sauce|dressing|relish)\b/, '🫙'],
+  [/\b(frozen|ice)\b/, '🧊'],
+];
+const PLACE_EMOJI = { Pantry: '🥫', Fridge: '🧊', Freezer: '❄️', Bathroom: '🧴', Garage: '🧰' };
+
+export function guessEmoji(name, location = '') {
+  const t = String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ');
+  for (const [re, emoji] of EMOJI_HINTS) if (re.test(t)) return emoji;
+  return PLACE_EMOJI[location] || '📦';
+}
+
 // "12 Mega Rolls" → { count: 12, unit: 'roll' } so one scan of the pack adds 12 rolls.
 export function parsePack(size) {
   const m = String(size || '').match(/(\d+)\s*(?:x\s*)?(?:[a-z]+\s+)?(rolls?|bars?|cans?|bottles?|pods?|tablets?|bags?|wipes?|capsules?|batteries|battery|pieces?|count|ct|pk|pack|pcs)\b/i);
