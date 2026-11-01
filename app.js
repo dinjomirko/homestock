@@ -1,11 +1,11 @@
 import {
   parseCommand, resolveActions, matchItem, matchExact, guessLocation, guessEmoji, parsePack, parseListLines,
   suggestShelfLife, openLife, isoDate, DEFAULT_LOCATIONS,
-} from './parser.js?v=35';
+} from './parser.js?v=36';
 import {
   initSync, pushSoon, syncInfo, createHousehold, joinHousehold, leaveHousehold, authenticate, useHousehold, signOut,
   removeMember, newJoinCode, renameMe,
-} from './sync.js?v=35';
+} from './sync.js?v=36';
 
 const APP_VERSION = new URL(import.meta.url).searchParams.get('v') || 'dev';
 const STORAGE_KEY = 'homestock.v1';
@@ -611,13 +611,16 @@ function renderShop() {
 // ---------- Recipes ----------
 // Pick the ingredients to cook with and get a ready-made question for Claude or any recipe app.
 
-const MEALS = ['Any meal', 'Breakfast', 'Lunch', 'Dinner', 'Snack', 'Dessert'];
+const MEALS = ['Any meal', 'Breakfast', 'Lunch', 'Dinner', 'Side dish', 'Snack', 'Dessert'];
+// How each meal reads in the question: "ideas for dinner", "ideas for a side dish".
+const MEAL_WORDS = { 'Any meal': 'a meal', 'Side dish': 'a side dish', Snack: 'a snack' };
+const CUISINES = ['Any cuisine', 'American', 'Caribbean', 'Chinese', 'French', 'Greek', 'Indian', 'Italian', 'Japanese', 'Korean', 'Mediterranean', 'Mexican', 'Middle Eastern', 'Spanish', 'Thai', 'Vietnamese'];
 const byUseBy = (a, b) => (daysLeft(a) ?? 999) - (daysLeft(b) ?? 999) || a.name.localeCompare(b.name);
 
 // Filled in place (not copied), so a change made through it sticks.
 function cookPrefs() {
   const c = (prefs.cook ??= {});
-  const defaults = { picked: [], meal: 'Any meal', servings: 2, extras: true, notes: '', others: false };
+  const defaults = { picked: [], meal: 'Any meal', cuisine: 'Any cuisine', servings: 2, extras: true, notes: '', others: false };
   for (const [k, v] of Object.entries(defaults)) c[k] ??= v;
   return c;
 }
@@ -640,7 +643,22 @@ function renderCook() {
   const others = allLocations().filter((pl) => !KITCHEN.includes(pl) && have.some((i) => shownIn(i).includes(pl)));
   const places = c.others ? [...kitchen, ...others] : kitchen;
   const soon = have.filter(useSoon);
-  let html = `<p class="note" style="margin:4px 4px 10px">Tick what you’d like to cook with, then copy a ready-made question for Claude or any recipe app.</p>
+  const cuisines = CUISINES.includes(c.cuisine) ? CUISINES : [...CUISINES, c.cuisine];
+  let html = `<p class="note" style="margin:4px 4px 0">Choose what you’re making and tick what to cook with, then ask Claude or copy the question for any recipe app.</p>
+    <div class="card form cook-options cook-what">
+      <h3>What are you making?</h3>
+      <div class="chips cook-meals" role="radiogroup" aria-label="Meal">${MEALS.map((m) => `<button type="button" class="chip ${m === c.meal ? 'on' : ''}" role="radio" aria-checked="${m === c.meal}" data-cook-meal="${esc(m)}">${m === 'Any meal' ? 'Any' : m}</button>`).join('')}</div>
+      <div class="row2">
+        <label>Cuisine<select data-cook-opt="cuisine">${cuisines.map((v) => `<option ${v === c.cuisine ? 'selected' : ''}>${esc(v)}</option>`).join('')}<option value="__other">Other…</option></select></label>
+        <label>Servings
+          <div class="stepper big"><button type="button" data-cook-serve="-1" aria-label="One fewer serving" ${c.servings <= 1 ? 'disabled' : ''}>−</button><input data-cook-opt="servings" type="number" inputmode="numeric" min="1" max="50" value="${c.servings}" aria-label="Servings"><button type="button" data-cook-serve="1" aria-label="One more serving">+</button></div>
+        </label>
+      </div>
+      <button type="button" class="cook-exact ${c.extras ? '' : 'on'}" role="checkbox" aria-checked="${!c.extras}" data-cook="exact">
+        <span class="check" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></svg></span>
+        <span><b>Exact ingredients only</b><small>${exactNote(c)}</small></span>
+      </button>
+    </div>
     <div class="chips cook-quick">
       ${soon.length ? `<button class="chip soon" data-cook="soon">Use soon <small>${soon.length}</small></button>` : ''}
       <button class="chip" data-cook="all">All shown</button>
@@ -660,18 +678,7 @@ function renderCook() {
     html += `<button class="link small show-others" data-cook="others">${c.others ? 'Hide' : 'Show'} ${others.map((pl) => esc(pl.toLowerCase())).join(', ')}</button>`;
   }
   html += `<div class="card form cook-options">
-      <h3>Recipe options</h3>
-      <div class="row2">
-        <label>Meal<select data-cook-opt="meal">${MEALS.map((m) => `<option ${m === c.meal ? 'selected' : ''}>${m}</option>`).join('')}</select></label>
-        <label>Servings<select data-cook-opt="servings">${[1, 2, 3, 4, 5, 6, 8].map((n) => `<option ${n === c.servings ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
-      </div>
-      <label>Ingredients
-        <select data-cook-opt="extras">
-          <option value="1" ${c.extras ? 'selected' : ''}>Happy to buy a few extras</option>
-          <option value="0" ${c.extras ? '' : 'selected'}>Only what I picked (plus basics)</option>
-        </select>
-      </label>
-      <label>Notes<input data-cook-opt="notes" value="${esc(c.notes)}" placeholder="e.g. vegetarian, 30 minutes, kid-friendly" autocomplete="off" enterkeyhint="done"></label>
+      <label style="margin-top:0">Anything else?<input data-cook-opt="notes" value="${esc(c.notes)}" placeholder="e.g. vegetarian, 30 minutes, kid-friendly" autocomplete="off" enterkeyhint="done"></label>
       <details class="cook-preview"><summary>See the question</summary><pre class="share-preview" id="cookPreview"></pre></details>
     </div>
     <div class="cook-spacer"></div>
@@ -683,18 +690,24 @@ function renderCook() {
   return html;
 }
 
+const exactNote = (c) => (c.extras ? 'Unticked: recipes can suggest a few extras to buy' : 'Only what you tick, plus basics like salt, oil and water');
+
 function recipePrompt() {
   const c = cookPrefs();
   const items = cookPicked().map(byId).filter(Boolean).sort(byUseBy);
-  const meal = c.meal === 'Any meal' ? 'a meal' : c.meal.toLowerCase();
+  const meal = MEAL_WORDS[c.meal] || c.meal.toLowerCase();
+  const cuisine = c.cuisine === 'Any cuisine' ? '' : `${c.cuisine} `;
+  const people = `${c.servings} ${c.servings === 1 ? 'person' : 'people'}`;
   const line = (i) => `- ${i.name} (${qtyText(i)})${useSoon(i) ? ' — use soon' : ''}`;
   return [
-    `I’d like recipe ideas for ${meal} for ${c.servings} ${c.servings === 1 ? 'person' : 'people'}, using what I have at home:`,
+    `I’d like ${cuisine}recipe ideas for ${meal} for ${people}, using what I have at home:`,
     items.map(line).join('\n'),
-    c.extras ? 'I’m happy to buy a few extra ingredients — list anything I’d need.' : 'Please use only these ingredients plus basics like salt, pepper, oil and water.',
+    c.extras
+      ? 'Feel free to suggest a few additional ingredients — list anything I’d need to buy separately.'
+      : 'Use only these ingredients plus basics like salt, pepper, oil and water — nothing I’d need to buy.',
     items.some(useSoon) ? 'Prioritise the ones marked “use soon”.' : '',
     c.notes.trim() ? `Notes: ${c.notes.trim()}` : '',
-    'Suggest 3 recipes, each with an ingredient list and short steps.',
+    `Suggest 3 recipes, each with an ingredient list (amounts for ${people}) and short steps.`,
   ].filter(Boolean).join('\n\n');
 }
 
@@ -735,7 +748,32 @@ $('#main').addEventListener('click', (e) => {
     const picked = cookPicked();
     return setPicked(picked.includes(id) ? picked.filter((x) => x !== id) : [...picked, id]);
   }
+  const c = cookPrefs();
+  const meal = e.target.closest('[data-cook-meal]');
+  if (meal) {
+    c.meal = meal.dataset.cookMeal;
+    document.querySelectorAll('[data-cook-meal]').forEach((b) => {
+      b.classList.toggle('on', b === meal);
+      b.setAttribute('aria-checked', b === meal);
+    });
+  }
+  const serve = e.target.closest('[data-cook-serve]');
+  if (serve) {
+    c.servings = Math.min(50, Math.max(1, c.servings + Number(serve.dataset.cookServe)));
+    showServings();
+  }
   const act = e.target.closest('[data-cook]')?.dataset.cook;
+  if (act === 'exact') {
+    c.extras = !c.extras;
+    const box = e.target.closest('.cook-exact');
+    box.classList.toggle('on', !c.extras);
+    box.setAttribute('aria-checked', !c.extras);
+    box.querySelector('small').textContent = exactNote(c);
+  }
+  if (meal || serve || act === 'exact') {
+    savePrefs();
+    return updateCookSummary();
+  }
   const shown = () => [...document.querySelectorAll('[data-pick-id]')].map((r) => r.dataset.pickId);
   if (act === 'soon') setPicked(state.items.filter(useSoon).map((i) => i.id));
   if (act === 'all') setPicked(shown());
@@ -756,11 +794,36 @@ $('#main').addEventListener('keydown', (e) => {
   }
 });
 
+// The servings box shows the saved count; − can't go below one.
+function showServings(typing = false) {
+  const n = cookPrefs().servings;
+  const box = $('[data-cook-opt="servings"]');
+  if (!box) return;
+  if (!typing) box.value = n;
+  box.previousElementSibling.disabled = n <= 1;
+}
+
 const readCookOption = (e) => {
   const key = e.target.dataset?.cookOpt;
   if (!key) return;
+  const c = cookPrefs();
   const v = e.target.value;
-  cookPrefs()[key] = key === 'servings' ? Number(v) : key === 'extras' ? v === '1' : v;
+  if (key === 'servings') {
+    // While typing, a blank or 0 waits; leaving the box puts the last good number back.
+    const n = parseInt(v, 10);
+    if (n >= 1) c.servings = Math.min(n, 50);
+    showServings(e.type === 'input');
+  } else if (key === 'cuisine' && v === '__other') {
+    if (e.type !== 'change') return;
+    const typed = titleCase(prompt('Which cuisine? (e.g. Cajun, Ethiopian, Filipino)') || '');
+    if (!typed) {
+      e.target.value = c.cuisine;
+      return;
+    }
+    c.cuisine = typed;
+    if (![...e.target.options].some((o) => o.value === typed)) e.target.querySelector('[value="__other"]').insertAdjacentHTML('beforebegin', `<option>${esc(typed)}</option>`);
+    e.target.value = typed;
+  } else c[key] = v;
   savePrefs();
   updateCookSummary();
 };

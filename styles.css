@@ -573,6 +573,20 @@ body { font-variant-numeric: lining-nums; }
 .pick-row.on .check svg { opacity: 1; color: var(--accent-ink); }
 .show-others { display: block; margin: 12px 4px 0; }
 .cook-options h3 { font-family: var(--serif); }
+.cook-what { margin-top: 10px; }
+.cook-meals { flex-wrap: wrap; overflow: visible; gap: 6px; padding: 8px 0 0; }
+.cook-meals .chip { padding: 6px 11px; }
+.cook-exact {
+  all: unset; box-sizing: border-box; display: flex; align-items: center; gap: 6px; width: 100%; margin-top: 14px;
+  cursor: pointer; -webkit-tap-highlight-color: transparent;
+}
+.cook-exact:focus-visible { outline: 2px solid var(--accent); border-radius: 10px; }
+.cook-exact .check { margin-left: -9px; }
+.cook-exact b { display: block; font-size: 16px; }
+.cook-exact small { display: block; font-size: 13px; color: var(--muted); }
+.cook-exact.on .check::before { background: var(--accent); border-color: var(--accent); }
+.cook-exact.on .check svg { opacity: 1; color: var(--accent-ink); }
+.cook-quick { padding-top: 16px; }
 .cook-preview { margin-top: 14px; }
 .cook-preview .share-preview { margin-top: 8px; }
 .cook-spacer { height: 84px; }
