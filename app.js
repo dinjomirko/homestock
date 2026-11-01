@@ -1,11 +1,11 @@
 import {
   parseCommand, resolveActions, matchItem, matchExact, guessLocation, guessEmoji, parsePack, parseListLines,
   suggestShelfLife, openLife, isoDate, DEFAULT_LOCATIONS,
-} from './parser.js?v=33';
+} from './parser.js?v=34';
 import {
   initSync, pushSoon, syncInfo, createHousehold, joinHousehold, leaveHousehold, authenticate, useHousehold, signOut,
   removeMember, newJoinCode, renameMe,
-} from './sync.js?v=33';
+} from './sync.js?v=34';
 
 const APP_VERSION = new URL(import.meta.url).searchParams.get('v') || 'dev';
 const STORAGE_KEY = 'homestock.v1';
@@ -343,6 +343,7 @@ function render() {
   const search = $('#search');
   const q = ui.view === 'house' ? ui.hq : ui.q;
   if (search.value !== q) search.value = q;
+  $('#searchClear').hidden = !q;
   search.placeholder = ui.view === 'house' ? 'Search the house' : 'Search everything';
   $('#title').textContent = { stock: 'Key Record', shop: 'Shopping', cook: 'Recipes', house: 'House' }[ui.view];
   const shopCount = shoppingItems().filter((i) => !ui.bought.has(i.id)).length;
@@ -3927,6 +3928,15 @@ $('#chips').addEventListener('click', (e) => {
 $('#search').addEventListener('input', (e) => {
   if (ui.view === 'house') ui.hq = e.target.value;
   else ui.q = e.target.value;
+  render();
+});
+
+// ✕ empties the search in one tap. Holding off the press keeps the keyboard as it was:
+// still up if you were typing, still down if you'd already put it away.
+$('#searchClear').addEventListener('mousedown', (e) => e.preventDefault());
+$('#searchClear').addEventListener('click', () => {
+  if (ui.view === 'house') ui.hq = '';
+  else ui.q = '';
   render();
 });
 

@@ -77,11 +77,21 @@ h1 { font-size: 28px; margin: 4px 0 10px; letter-spacing: -.02em; }
 .icon-btn { background: none; border: 0; width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center; color: var(--muted); }
 .icon-btn svg circle { fill: currentColor; stroke: none; }
 .search-wrap { position: relative; }
-.search-wrap svg { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); width: 18px; height: 18px; color: var(--muted); pointer-events: none; }
+.search-wrap > svg { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); width: 18px; height: 18px; color: var(--muted); pointer-events: none; }
 #search {
-  width: 100%; font: inherit; padding: 11px 14px 11px 38px; border-radius: 12px;
+  width: 100%; font: inherit; padding: 11px 42px 11px 38px; border-radius: 12px;
   border: 1px solid var(--line); background: var(--card); color: var(--ink); -webkit-appearance: none;
 }
+/* Our own clear button replaces the browser's, which iPhone doesn't show. */
+#search::-webkit-search-cancel-button, #search::-webkit-search-decoration { -webkit-appearance: none; display: none; }
+.search-clear {
+  position: absolute; right: 2px; top: 50%; transform: translateY(-50%); width: 42px; height: 42px; padding: 0;
+  border: 0; background: none; display: grid; place-items: center; cursor: pointer; -webkit-tap-highlight-color: transparent;
+}
+.search-clear svg { width: 20px; height: 20px; }
+.search-clear circle { fill: var(--muted); stroke: none; opacity: .7; }
+.search-clear path { stroke: var(--card); stroke-width: 2.2; }
+.search-clear:active circle { opacity: 1; }
 .chips { display: flex; gap: 8px; overflow-x: auto; padding: 10px 0 2px; scrollbar-width: none; }
 .chips::-webkit-scrollbar { display: none; }
 .chips.dropping { flex-wrap: wrap; }
