@@ -1,11 +1,11 @@
 import {
   parseCommand, resolveActions, matchItem, matchExact, guessLocation, guessEmoji, parsePack, parseListLines,
   suggestShelfLife, openLife, isoDate, DEFAULT_LOCATIONS,
-} from './parser.js?v=37';
+} from './parser.js?v=38';
 import {
   initSync, pushSoon, syncInfo, createHousehold, joinHousehold, leaveHousehold, authenticate, useHousehold, signOut,
   removeMember, newJoinCode, renameMe,
-} from './sync.js?v=37';
+} from './sync.js?v=38';
 
 const APP_VERSION = new URL(import.meta.url).searchParams.get('v') || 'dev';
 const STORAGE_KEY = 'homestock.v1';
@@ -78,6 +78,7 @@ function save() {
     if (it.listOnly && it.qty > 0) delete it.listOnly;
     if (it.qty <= 0) delete it.opened;
     tidySpots(it);
+    tidyEach(it);
   }
   updateBadge();
   try {
@@ -302,11 +303,62 @@ function singularUnit(u) {
 
 const qtyText = (it, n = it.qty) => `${fmt(n)}${it.unit ? ' ' + pluralUnit(it.unit, n) : ''}`;
 
+// ---------- Expiration ----------
+// `useBy` is the expiration date and `opened` the day it was opened ('yes' when the day isn't
+// known). Once open, something lasts `openDays` (or the usual for its kind), so it's good until
+// whichever comes first. Several of one thing can be tracked one by one in `each`, a list of
+// {opened, useBy}; the item's own fields then mirror the soonest, for older copies of the app.
+
+const isDay = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s || '');
+const plusDays = (iso, n) => {
+  const [y, m, d] = iso.split('-').map(Number);
+  return isoDate(new Date(y, m - 1, d + n));
+};
+const openDaysOf = (it) => it.openDays || openLife(it.name);
+
+function goodUntil(it, u = it) {
+  const days = openDaysOf(it);
+  const fromOpen = isDay(u.opened) && days ? plusDays(u.opened, days) : '';
+  return [u.useBy, fromOpen].filter(Boolean).sort()[0] || '';
+}
+// The date that matters for the item: the soonest any of them goes off.
+const useByOf = (it) => (it.each ? it.each.map((u) => goodUntil(it, u)).filter(Boolean).sort()[0] || '' : goodUntil(it));
+const soonestFirst = (it) => (a, b) => (goodUntil(it, a) || '9999').localeCompare(goodUntil(it, b) || '9999');
+
+// A new one's expiration: how long this item usually lasts, if known.
+function freshDate(it) {
+  const days = it.noUseBy ? 0 : it.shelfLife || suggestShelfLife(it.name, it.location);
+  return days ? dateIn(days) : '';
+}
+
+// Things tracked one by one follow the count: using one takes the one that goes off soonest,
+// buying one adds a fresh one. Down to one, it folds back into the item.
+function tidyEach(it) {
+  if (!it.each) return;
+  const n = Math.ceil(round(it.qty));
+  while (it.each.length > n) it.each.splice(it.each.indexOf([...it.each].sort(soonestFirst(it))[0]), 1);
+  while (it.each.length < n) it.each.push({ opened: '', useBy: freshDate(it) });
+  if (n < 2) {
+    const [u] = it.each;
+    delete it.each;
+    if (!u) return;
+    it.useBy = u.useBy;
+    if (u.opened) it.opened = u.opened;
+    else delete it.opened;
+    return;
+  }
+  it.useBy = useByOf(it);
+  const opened = it.each.map((u) => u.opened).filter(Boolean).sort()[0];
+  if (opened) it.opened = opened;
+  else delete it.opened;
+}
+
 function daysLeft(it) {
-  if (!it.useBy) return null;
+  const by = useByOf(it);
+  if (!by) return null;
   const today = new Date();
   today.setHours(0, 0, 0, 0);
-  return Math.round((new Date(it.useBy + 'T00:00') - today) / 864e5);
+  return Math.round((new Date(by + 'T00:00') - today) / 864e5);
 }
 const useSoon = (it) => it.qty > 0 && daysLeft(it) !== null && daysLeft(it) <= 7;
 
@@ -316,7 +368,7 @@ function useByHtml(it) {
   if (n < 0) return '<span class="bad">Expired</span>';
   if (n === 0) return '<span class="bad">Use today</span>';
   if (n <= 3) return `<span class="warn">Use within ${n} day${n === 1 ? '' : 's'}</span>`;
-  const d = new Date(it.useBy + 'T00:00');
+  const d = new Date(useByOf(it) + 'T00:00');
   if (n <= 7) return `<span class="warn">Use by ${d.toLocaleDateString(undefined, { weekday: 'long' })}</span>`;
   return `Use by ${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`;
 }
@@ -379,7 +431,13 @@ function thumb(it, asButton = true) {
 }
 
 function openedText(it) {
-  if (!it.opened || it.qty <= 0) return '';
+  if (it.qty <= 0) return '';
+  if (it.each) {
+    const n = it.each.filter((u) => u.opened).length;
+    return n ? `${n} of ${it.each.length} opened` : '';
+  }
+  if (!it.opened) return '';
+  if (!isDay(it.opened)) return 'Opened';
   const days = Math.round((new Date(todayIso() + 'T00:00') - new Date(it.opened + 'T00:00')) / 864e5);
   return days <= 0 ? 'Opened today' : days === 1 ? 'Opened yesterday' : `Opened ${days} days ago`;
 }
@@ -919,7 +977,7 @@ function setCount(it, place = null) {
 }
 
 function markBought(it) {
-  ui.bought.set(it.id, { qty: it.qty, need: it.need, listOnly: it.listOnly, useBy: it.useBy, spots: it.spots && { ...it.spots } });
+  ui.bought.set(it.id, { qty: it.qty, need: it.need, listOnly: it.listOnly, useBy: it.useBy, opened: it.opened, each: it.each?.map((u) => ({ ...u })), spots: it.spots && { ...it.spots } });
   const qtyBefore = it.qty;
   it.qty = Math.max(it.qty + (it.scanQty || 1), (it.low ?? 0) + 1);
   freshUseBy(it, qtyBefore);
@@ -1139,7 +1197,7 @@ function applyActions(actions) {
         if (!it || !isLow(it)) it = matchExact(a.name, listed)?.item || matchItem(a.name, listed)?.item || it;
         if (!it) { problems.push(`Couldn't find “${a.name}” on the list or in stock`); continue; }
         if (isLow(it)) {
-          ui.bought.set(it.id, { qty: it.qty, need: it.need, listOnly: it.listOnly, location: it.location, useBy: it.useBy, spots: it.spots && { ...it.spots } });
+          ui.bought.set(it.id, { qty: it.qty, need: it.need, listOnly: it.listOnly, location: it.location, useBy: it.useBy, opened: it.opened, each: it.each?.map((u) => ({ ...u })), spots: it.spots && { ...it.spots } });
           const qtyBefore = it.qty;
           const bought = a.qty != null ? a.qty : Math.max(it.scanQty || 1, (it.low ?? 0) + 1 - it.qty);
           // Still have some in the main place? Then what you bought goes to the place you named.
@@ -1194,22 +1252,23 @@ function applyActions(actions) {
   return { done, problems, answers };
 }
 
-// Use-by set by hand or by voice; remembered as how long this item usually lasts.
+// Expiration date set by hand or by voice; remembered as how long this item usually lasts.
+// Set by voice for something tracked one by one, it applies to each of them.
 function setUseBy(it, useBy) {
   it.useBy = useBy;
   delete it.noUseBy;
+  it.each?.forEach((u) => (u.useBy = useBy));
   const days = Math.round((new Date(useBy + 'T00:00') - new Date(todayIso() + 'T00:00')) / 864e5);
   if (days >= 1 && days <= 120 && !it.opened) it.shelfLife = days;
 }
 
-// Opening starts the clock: things like milk or salsa only last so long once open.
+// Opening starts the clock: things like milk or salsa only last so long once open. Of several
+// tracked one by one, the one opened is the unopened one that goes off soonest.
 function markOpened(it, date = todayIso()) {
-  it.opened = date;
-  const days = openLife(it.name);
-  if (!days) return null;
-  const by = isoDate(new Date(new Date(date + 'T00:00').getTime() + days * 864e5));
-  if (!it.useBy || by < it.useBy) it.useBy = by;
-  return days;
+  const u = it.each ? it.each.filter((x) => !x.opened).sort(soonestFirst(it))[0] : it;
+  if (u) u.opened = date;
+  tidyEach(it);
+  return openDaysOf(it);
 }
 
 // "Half a bottle left": the open one is part used; any unopened ones stay whole.
@@ -1420,6 +1479,151 @@ const redrawSpots = (form) => ($('#spots', form).innerHTML = spotsHtml(form.loca
 
 const LEVELS = [['', 'Full'], ['0.75', '¾'], ['0.5', '½'], ['0.25', '¼'], ['0.1', 'Almost empty']];
 
+// Opened and expiration on the item page: for all of them at once, or, when there are several,
+// for each one separately. The page's choices live in ui.editor.dates and ui.editor.each.
+const OPEN_DAYS = [2, 3, 5, 7, 10, 14, 21, 30, 60, 90, 180, 365];
+const daysText = (n) => (n % 365 === 0 ? `${n / 365} year${n > 365 ? 's' : ''}` : n % 30 === 0 ? `${n / 30} month${n > 30 ? 's' : ''}`
+  : n % 7 === 0 ? `${n / 7} week${n > 7 ? 's' : ''}` : `${n} day${n === 1 ? '' : 's'}`);
+const dayText = (iso) => new Date(iso + 'T00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: iso.slice(0, 4) === todayIso().slice(0, 4) ? undefined : 'numeric' });
+const MAX_EACH = 24;
+
+// What the page's choices add up to, as an item the expiration helpers understand.
+function draftOf(name) {
+  const d = ui.editor.dates;
+  const asStored = (u) => ({ opened: u.opened ? u.openedOn || 'yes' : '', useBy: u.useBy });
+  return { name, openDays: Number(d.openDays) || 0, ...asStored(d), each: ui.editor.each?.map(asStored) };
+}
+
+// "Use by Nov 11: 1 week after opening, before its Mar 1 expiration date."
+function goodNote(it, u) {
+  const days = openDaysOf(it);
+  const until = goodUntil(it, u);
+  if (u.opened && !isDay(u.opened) && days) return `Add the date it was opened to count the ${daysText(days)} it lasts once open.`;
+  if (isDay(u.opened) && !days && !u.useBy) return 'Choose how long it lasts once opened to work out when to use it by.';
+  if (!until) return '';
+  const fromOpen = isDay(u.opened) && days ? plusDays(u.opened, days) : '';
+  const left = Math.round((new Date(until + 'T00:00') - new Date(todayIso() + 'T00:00')) / 864e5);
+  const when = left < 0 ? `Expired ${dayText(until)}` : left === 0 ? 'Use today' : `Use by ${dayText(until)}`;
+  if (until !== fromOpen) return `${when}: the expiration date.`;
+  return `${when}: ${daysText(days)} after opening${u.useBy && u.useBy > until ? `, before its ${dayText(u.useBy)} expiration date` : ''}.`;
+}
+
+// The short form, for each one's card: "Use by Nov 11".
+function goodShort(it, u) {
+  const until = goodUntil(it, u);
+  if (!until) return '';
+  const left = Math.round((new Date(until + 'T00:00') - new Date(todayIso() + 'T00:00')) / 864e5);
+  return left < 0 ? 'Expired' : left === 0 ? 'Use today' : `Use by ${dayText(until)}`;
+}
+
+const openedPick = (attr, on) => `<select ${attr}><option value="">Not opened</option><option value="1" ${on ? 'selected' : ''}>Opened</option></select>`;
+
+function datesHtml(item, n) {
+  const d = ui.editor.dates;
+  const each = ui.editor.each;
+  const word = item.unit || 'one';
+  const today = todayIso();
+  const draft = draftOf(item.name);
+  const anyOpen = each ? each.some((u) => u.opened) : d.opened;
+  const usualOpen = openLife(item.name);
+  const usual = item.shelfLife || suggestShelfLife(item.name, item.location);
+  const openRow = `<div class="row2" ${anyOpen ? '' : 'hidden'}>
+      <label>Left in the open ${esc(word)}<select name="level">${LEVELS.map(([v, t]) => `<option value="${v}" ${v === d.level ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
+      <label>Lasts once opened<select data-d="openDays"><option value="">${usualOpen ? `Usually ${daysText(usualOpen)}` : 'Not sure'}</option>${OPEN_DAYS.map((n) => `<option value="${n}" ${String(n) === d.openDays ? 'selected' : ''}>${daysText(n)}</option>`).join('')}</select></label>
+    </div>`;
+  if (each) {
+    const name = (i) => `${item.unit ? esc(sentenceCase(item.unit)) : 'No.'} ${i + 1}`;
+    return `<div class="each-head"><span class="label">Each ${esc(word)} separately</span><button type="button" class="link small" data-edit="same">Same for all</button></div>
+      ${each.map((u, i) => `<div class="unit-card" data-unit="${i}">
+        <div class="unit-head"><b>${name(i)}</b><span class="meta">${esc(goodShort(draft, draft.each[i]))}</span></div>
+        <div class="row2">
+          <label>Opened${openedPick('data-u="opened"', u.opened)}</label>
+          <label ${u.opened ? '' : 'hidden'}>Date opened<input type="date" data-u="openedOn" value="${esc(u.openedOn)}" max="${today}"></label>
+        </div>
+        <label>Expiration date<input type="date" data-u="useBy" value="${esc(u.useBy)}"></label>
+      </div>`).join('')}
+      ${openRow}`;
+  }
+  return `<div class="row2">
+      <label>Opened${openedPick('data-d="opened"', d.opened)}</label>
+      <label ${d.opened ? '' : 'hidden'}>Date opened <span class="opt">(optional)</span><input type="date" data-d="openedOn" value="${esc(d.openedOn)}" max="${today}"></label>
+    </div>
+    ${openRow}
+    <label>Expiration date <span class="opt">(optional)</span><input type="date" data-d="useBy" value="${esc(d.useBy)}"></label>
+    <div class="quick-dates">
+      ${[[3, '+3 days'], [7, '1 week'], [14, '2 weeks'], [30, '1 month']].map(([n, t]) => `<button type="button" data-days="${n}">${t}</button>`).join('')}
+      ${usual ? `<button type="button" data-days="${usual}" class="usual">Usually ${usual} days</button>` : ''}
+      <button type="button" data-days="clear">Clear</button>
+    </div>
+    <p class="note good-note" id="goodNote">${esc(goodNote(draft, draft))}</p>
+    ${n >= 2 && n <= MAX_EACH ? `<button type="button" class="link small each-link" data-edit="each">Not all the same? Set each ${esc(word)} separately</button>` : ''}`;
+}
+
+// Reads what's on the page into ui.editor.dates and ui.editor.each.
+function readDates(form) {
+  $('#editError', form).textContent = '';
+  const box = $('#dates', form);
+  const d = ui.editor.dates;
+  const field = (k) => box.querySelector(`[data-d="${k}"]`);
+  if (field('opened')) {
+    d.opened = field('opened').value === '1';
+    d.openedOn = field('openedOn').value;
+    d.useBy = field('useBy').value;
+  }
+  d.level = form.level.value;
+  d.openDays = field('openDays').value;
+  ui.editor.each?.forEach((u, i) => {
+    const card = box.querySelector(`[data-unit="${i}"]`);
+    if (!card) return;
+    u.opened = card.querySelector('[data-u="opened"]').value === '1';
+    u.openedOn = card.querySelector('[data-u="openedOn"]').value;
+    u.useBy = card.querySelector('[data-u="useBy"]').value;
+  });
+}
+
+// How many there are in all, going by the page: the count here plus any kept elsewhere.
+function pageCount(form) {
+  syncSpots(form);
+  const elsewhere = Object.entries(ui.editor.spots).filter(([pl]) => pl !== form.location.value).reduce((a, [, n]) => a + n, 0);
+  return Math.ceil(round((parseFloat(form.qty.value) || 0) + elsewhere));
+}
+
+// One for all: any of them opened counts, from the earliest date; the soonest expiration wins.
+function sameForAll() {
+  const each = ui.editor.each;
+  const d = ui.editor.dates;
+  d.opened = each.some((u) => u.opened);
+  d.openedOn = each.filter((u) => u.opened).map((u) => u.openedOn).filter(Boolean).sort()[0] || '';
+  d.useBy = each.map((u) => u.useBy).filter(Boolean).sort()[0] || '';
+  ui.editor.each = null;
+}
+
+// Redraws the dates after a change; the cards follow the count (the last ones go first).
+function redrawDates(form) {
+  const n = pageCount(form);
+  const each = ui.editor.each;
+  if (each) {
+    each.length = Math.min(each.length, n);
+    while (each.length < n) each.push({ opened: false, openedOn: '', useBy: freshDate({ ...ui.editor.item, name: form.name.value }) });
+    if (n < 2) sameForAll();
+  }
+  const d = ui.editor.dates;
+  if (!(each ? each.some((u) => u.opened) : d.opened)) d.level = '';
+  const unit = form.unit.value === '__new' ? ui.editor.item.unit : singularUnit(form.unit.value); // "Other…" is still asking
+  $('#dates', form).innerHTML = datesHtml({ ...ui.editor.item, name: form.name.value, unit, location: form.location.value }, n);
+}
+
+// Notes only, so typing a date doesn't redraw the field under your finger.
+function updateGoodNotes(form) {
+  const draft = draftOf(form.name.value);
+  const note = $('#goodNote', form);
+  if (note) note.textContent = goodNote(draft, draft);
+  draft.each?.forEach((u, i) => {
+    const meta = $(`[data-unit="${i}"] .unit-head .meta`, form);
+    if (meta) meta.textContent = goodShort(draft, u);
+  });
+}
+
 function renderEditor() {
   const { item, isNew, hint, similar, fromScan } = ui.editor;
   ui.editor.spots ??= { ...(item.spots || {}) };
@@ -1429,8 +1633,11 @@ function renderEditor() {
   const frac = round(main % 1);
   const count = frac ? Math.ceil(main) : main;
   const level = frac ? LEVELS.slice(1).reduce((best, l) => (Math.abs(l[0] - frac) < Math.abs(best[0] - frac) ? l : best))[0] : '';
-  const today = todayIso();
-  const usual = item.shelfLife || suggestShelfLife(item.name, item.location);
+  // A part-used one counts as opened even if that was never recorded.
+  ui.editor.dates ??= {
+    opened: Boolean(item.opened || frac), openedOn: isDay(item.opened) ? item.opened : '', useBy: item.useBy || '', level, openDays: item.openDays ? String(item.openDays) : '',
+  };
+  ui.editor.each ??= item.each ? item.each.map((u) => ({ opened: Boolean(u.opened), openedOn: isDay(u.opened) ? u.opened : '', useBy: u.useBy || '' })) : null;
   return `<form class="form editor" id="editForm" novalidate>
     <div class="page-head">
       <button type="button" class="link" data-edit="cancel">${fromScan && isNew ? 'Skip' : 'Cancel'}</button>
@@ -1457,24 +1664,7 @@ function renderEditor() {
     <div class="row2" id="wherePick">${wherePickers(item.location, item.shelf || '')}</div>
     <div id="spots">${spotsHtml(item.location)}</div>
     <label>Buy at ${storePicker(item.store || '')}</label>
-    <div class="row2">
-      <label>Opened
-        <select name="opened">
-          <option value="">Not opened</option>
-          <option value="${today}" ${item.opened === today ? 'selected' : ''}>Opened today</option>
-          ${item.opened && item.opened !== today ? `<option value="${item.opened}" selected>Opened ${new Date(item.opened + 'T00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</option>` : ''}
-        </select>
-      </label>
-      <label>Left in the open one
-        <select name="level">${LEVELS.map(([v, t]) => `<option value="${v}" ${v === level ? 'selected' : ''}>${t}</option>`).join('')}</select>
-      </label>
-    </div>
-    <label>Use by <span style="font-weight:400">(optional)</span><input name="useBy" type="date" value="${esc(item.useBy || '')}"></label>
-    <div class="quick-dates">
-      ${[[3, '+3 days'], [7, '1 week'], [14, '2 weeks'], [30, '1 month']].map(([d, t]) => `<button type="button" data-days="${d}">${t}</button>`).join('')}
-      ${usual ? `<button type="button" data-days="${usual}" class="usual">Usually ${usual} days</button>` : ''}
-      <button type="button" data-days="clear">Clear</button>
-    </div>
+    <div id="dates">${datesHtml(item, Math.ceil(round(item.qty)))}</div>
     <details><summary>Shopping & scanning</summary>
       <div class="row2">
         <label>Add to list at
@@ -1485,6 +1675,7 @@ function renderEditor() {
       <label>Brand<input name="brand" value="${esc(item.brand)}" autocomplete="off"></label>
       <label>Barcode<input name="barcode" inputmode="numeric" value="${esc(item.barcode)}" autocomplete="off"></label>
     </details>
+    <p class="note error" id="editError" role="alert"></p>
     <button class="primary" type="submit">${fromScan ? 'Save & keep scanning' : isNew ? 'Add item' : 'Save'}</button>
     ${isNew ? '' : `<button type="button" class="danger" data-edit="delete">Delete item</button>
       <p class="note" style="text-align:center">Last changed ${ago(item.updated)}${item.by && syncInfo().joined ? ` by ${esc(item.by)}` : ''}</p>`}
@@ -1496,8 +1687,25 @@ $('#main').addEventListener('click', (e) => {
   if (!form || !ui.editor) return;
   const { item } = ui.editor;
   const step = e.target.closest('[data-step]');
-  if (step) form.qty.value = Math.max(0, round((parseFloat(form.qty.value) || 0) + Number(step.dataset.step)));
+  if (step) {
+    form.qty.value = Math.max(0, round((parseFloat(form.qty.value) || 0) + Number(step.dataset.step)));
+    readDates(form);
+    redrawDates(form);
+  }
   const act = e.target.closest('[data-edit]')?.dataset.edit;
+  // Several of one thing: one card each, starting from what's set for all of them (that's the
+  // open one, if one is open, and the rest sealed).
+  if (act === 'each') {
+    readDates(form);
+    const d = ui.editor.dates;
+    ui.editor.each = Array.from({ length: pageCount(form) }, (_, i) => ({ opened: i === 0 && d.opened, openedOn: i === 0 && d.opened ? d.openedOn : '', useBy: d.useBy }));
+    redrawDates(form);
+  }
+  if (act === 'same') {
+    readDates(form);
+    sameForAll();
+    redrawDates(form);
+  }
   if (act === 'cancel') closeEditor(null);
   if (act === 'link') linkScannedTo(byId(e.target.closest('[data-id]').dataset.id));
   if (act === 'open-existing') {
@@ -1506,7 +1714,11 @@ $('#main').addEventListener('click', (e) => {
     if (existing) openEditor(existing);
   }
   const days = e.target.closest('[data-days]')?.dataset.days;
-  if (days) form.useBy.value = days === 'clear' ? '' : dateIn(Number(days));
+  if (days) {
+    $('[data-d="useBy"]', form).value = days === 'clear' ? '' : dateIn(Number(days));
+    readDates(form);
+    updateGoodNotes(form);
+  }
   const spotStep = e.target.closest('[data-spot-step]');
   if (spotStep) {
     syncSpots(form);
@@ -1519,6 +1731,10 @@ $('#main').addEventListener('click', (e) => {
     syncSpots(form);
     delete ui.editor.spots[spotDel];
     redrawSpots(form);
+  }
+  if (spotStep || spotDel) {
+    readDates(form);
+    redrawDates(form);
   }
   // The new photo is kept aside until Save, so Cancel throws it away.
   if (act === 'photo') {
@@ -1550,6 +1766,12 @@ $('#main').addEventListener('change', (e) => {
     syncSpots(form);
     ui.editor.spots[e.target.value] = 1;
     redrawSpots(form);
+  }
+  // Opening or counting shows and hides fields; anything else only changes the notes.
+  if (e.target.closest('#dates') || e.target.matches('[name="qty"], [name="unit"], [data-spot], [data-add-spot]')) {
+    readDates(form);
+    if (e.target.matches('[data-d="opened"], [data-u="opened"], [name="qty"], [name="unit"], [data-spot], [data-add-spot]')) redrawDates(form);
+    else updateGoodNotes(form);
   }
   if (e.target.name === 'location' || e.target.name === 'shelf') {
     const sel = e.target;
@@ -1586,6 +1808,10 @@ $('#main').addEventListener('change', (e) => {
 
 $('#main').addEventListener('input', (e) => {
   const form = e.target.closest('#editForm');
+  if (form && ui.editor && e.target.matches('#dates input')) {
+    readDates(form);
+    updateGoodNotes(form);
+  }
   if (!form || e.target.name !== 'name' || !ui.editor) return;
   if (ui.editor.photo === undefined && !ui.editor.item.image) showEditorPhoto(form);
   showDupHint(form);
@@ -1614,9 +1840,17 @@ $('#main').addEventListener('submit', (e) => {
     form.name.placeholder = 'Give it a name first';
     return;
   }
+  readDates(form);
+  const d = ui.editor.dates;
+  const today = todayIso();
+  const opens = ui.editor.each ? ui.editor.each.filter((u) => u.opened).map((u) => u.openedOn) : d.opened ? [d.openedOn] : [];
+  if (opens.some((day) => day > today)) {
+    $('#editError', form).textContent = 'A date opened can’t be in the future.';
+    return $('#dates', form).scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }
   checkpoint();
   const qtyBefore = item.qty;
-  const { opened: openedBefore, useBy: useByBefore } = item;
+  const useByBefore = item.each ? '' : item.useBy;
   syncSpots(form);
   const count = Math.max(0, parseFloat(form.qty.value) || 0);
   const level = parseFloat(form.level.value) || 0;
@@ -1638,15 +1872,23 @@ $('#main').addEventListener('submit', (e) => {
   if (ui.editor.photo !== undefined) item.image = ui.editor.photo;
   if (Object.keys(spots).length) item.spots = spots;
   else delete item.spots;
-  if (form.useBy.value !== (useByBefore || '')) {
-    if (form.useBy.value) setUseBy(item, form.useBy.value);
-    else {
-      item.useBy = '';
-      item.noUseBy = true; // cleared on purpose: don't fill it in again on the next purchase
+  if (d.openDays) item.openDays = Number(d.openDays);
+  else delete item.openDays;
+  const each = ui.editor.each;
+  if (each && each.length >= 2) {
+    item.each = each.map((u) => ({ opened: u.opened ? u.openedOn || 'yes' : '', useBy: u.useBy }));
+  } else {
+    delete item.each;
+    if (d.useBy !== (useByBefore || '')) {
+      if (d.useBy) setUseBy(item, d.useBy);
+      else {
+        item.useBy = '';
+        item.noUseBy = true; // cleared on purpose: don't fill it in again on the next purchase
+      }
     }
+    if (d.opened) item.opened = d.openedOn || 'yes';
+    else delete item.opened;
   }
-  if (!form.opened.value) delete item.opened;
-  else if (form.opened.value !== openedBefore) markOpened(item, form.opened.value);
   for (const pl of placesOf(item)) if (!prefs.places.includes(pl)) prefs.places.push(pl);
   if (item.shelf && !spotsIn(item.location).includes(item.shelf)) prefs.subPlaces[item.location] = [...spotsIn(item.location), item.shelf];
   savePrefs();
@@ -2774,7 +3016,7 @@ function showCheckCard(item, code) {
       <div class="info">
         <div class="delta ${isLow(item) ? 'minus' : ''}">${status}</div>
         <div class="name">${esc(item.name)}</div>
-        <div class="meta">${esc(item.location)}${item.useBy ? ` · ${useByHtml(item)}` : ''}</div>
+        <div class="meta">${esc(item.location)}${useByOf(item) ? ` · ${useByHtml(item)}` : ''}</div>
       </div>
     </div>
     <div class="result-actions">

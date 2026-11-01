@@ -654,3 +654,17 @@ body { font-variant-numeric: lining-nums; }
 
 /* Scanning for the House tab, or into one field: no Add / Use / Check */
 .scanner.task .seg { visibility: hidden; }
+
+/* Opened and expiration on the item page */
+.form .opt { font-weight: 400; }
+.good-note { margin: 10px 2px 0; font-size: 14px; color: var(--ink); }
+.good-note:empty { display: none; }
+.each-link { display: block; margin-top: 8px; padding: 6px 0 0 2px; min-height: 36px; }
+.each-head { display: flex; align-items: center; justify-content: space-between; margin-top: 16px; }
+.each-head .label { margin: 0; }
+.each-head .link { min-height: 36px; }
+.unit-card { border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px 12px; margin-top: 10px; }
+.unit-card label:first-child, .unit-card .row2 label { margin-top: 8px; }
+.unit-card > label { margin-top: 10px; }
+.unit-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.unit-head .meta { font-size: 13px; }
