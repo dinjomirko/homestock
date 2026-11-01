@@ -1,11 +1,11 @@
 import {
   parseCommand, resolveActions, matchItem, matchExact, guessLocation, guessEmoji, parsePack, parseListLines,
   suggestShelfLife, openLife, isoDate, DEFAULT_LOCATIONS,
-} from './parser.js?v=36';
+} from './parser.js?v=37';
 import {
   initSync, pushSoon, syncInfo, createHousehold, joinHousehold, leaveHousehold, authenticate, useHousehold, signOut,
   removeMember, newJoinCode, renameMe,
-} from './sync.js?v=36';
+} from './sync.js?v=37';
 
 const APP_VERSION = new URL(import.meta.url).searchParams.get('v') || 'dev';
 const STORAGE_KEY = 'homestock.v1';
@@ -49,9 +49,10 @@ delete prefs.shopStore; // the store filter used to be remembered between launch
 // shopStore: the store picked at the top of the shopping list, for this visit only.
 // select: while picking several Stock items to move together, a Map of picked rows.
 // hq, room: search and room filter on the House tab. assetEditor: the belonging being edited.
+// cq: the ingredient search on the Recipes tab.
 const ui = {
   view: 'stock', loc: 'All', q: '', bought: new Map(), flash: null, editor: null, paste: null, account: null, shopStore: 'all', select: null,
-  hq: '', room: 'All', assetEditor: null,
+  hq: '', room: 'All', assetEditor: null, cq: '',
 };
 const undoStack = [];
 
@@ -361,7 +362,10 @@ function render() {
     return;
   }
   $('#main').innerHTML = { stock: renderStock, shop: renderShop, cook: renderCook, house: renderHouse }[ui.view]();
-  if (ui.view === 'cook') updateCookSummary();
+  if (ui.view === 'cook') {
+    filterCook();
+    updateCookSummary();
+  }
   renderPickBar();
   if (ui.flash) $('#main .flash')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   ui.flash = null;
@@ -641,38 +645,46 @@ function renderCook() {
   }
   const kitchen = allLocations().filter((pl) => KITCHEN.includes(pl));
   const others = allLocations().filter((pl) => !KITCHEN.includes(pl) && have.some((i) => shownIn(i).includes(pl)));
-  const places = c.others ? [...kitchen, ...others] : kitchen;
   const soon = have.filter(useSoon);
   const cuisines = CUISINES.includes(c.cuisine) ? CUISINES : [...CUISINES, c.cuisine];
   let html = `<p class="note" style="margin:4px 4px 0">Choose what you’re making and tick what to cook with, then ask Claude or copy the question for any recipe app.</p>
     <div class="card form cook-options cook-what">
       <h3>What are you making?</h3>
-      <div class="chips cook-meals" role="radiogroup" aria-label="Meal">${MEALS.map((m) => `<button type="button" class="chip ${m === c.meal ? 'on' : ''}" role="radio" aria-checked="${m === c.meal}" data-cook-meal="${esc(m)}">${m === 'Any meal' ? 'Any' : m}</button>`).join('')}</div>
       <div class="row2">
+        <label>Category<select data-cook-opt="meal">${MEALS.map((m) => `<option value="${esc(m)}" ${m === c.meal ? 'selected' : ''}>${m === 'Any meal' ? 'Any' : m}</option>`).join('')}</select></label>
         <label>Cuisine<select data-cook-opt="cuisine">${cuisines.map((v) => `<option ${v === c.cuisine ? 'selected' : ''}>${esc(v)}</option>`).join('')}<option value="__other">Other…</option></select></label>
-        <label>Servings
-          <div class="stepper big"><button type="button" data-cook-serve="-1" aria-label="One fewer serving" ${c.servings <= 1 ? 'disabled' : ''}>−</button><input data-cook-opt="servings" type="number" inputmode="numeric" min="1" max="50" value="${c.servings}" aria-label="Servings"><button type="button" data-cook-serve="1" aria-label="One more serving">+</button></div>
-        </label>
       </div>
+      <label class="cook-serves">Servings
+        <div class="stepper big"><button type="button" data-cook-serve="-1" aria-label="One fewer serving" ${c.servings <= 1 ? 'disabled' : ''}>−</button><input data-cook-opt="servings" type="number" inputmode="numeric" min="1" max="50" value="${c.servings}" aria-label="Servings"><button type="button" data-cook-serve="1" aria-label="One more serving">+</button></div>
+      </label>
       <button type="button" class="cook-exact ${c.extras ? '' : 'on'}" role="checkbox" aria-checked="${!c.extras}" data-cook="exact">
         <span class="check" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></svg></span>
         <span><b>Exact ingredients only</b><small>${exactNote(c)}</small></span>
+      </button>
+    </div>
+    <div class="search-wrap cook-search">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+      <input id="cookSearch" type="search" value="${esc(ui.cq)}" placeholder="Search ingredients" autocomplete="off" enterkeyhint="search" aria-label="Search ingredients">
+      <button type="button" class="search-clear" data-cook="clear-search" aria-label="Clear search" ${ui.cq ? '' : 'hidden'}>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9 9l6 6M15 9l-6 6"/></svg>
       </button>
     </div>
     <div class="chips cook-quick">
       ${soon.length ? `<button class="chip soon" data-cook="soon">Use soon <small>${soon.length}</small></button>` : ''}
       <button class="chip" data-cook="all">All shown</button>
       <button class="chip" data-cook="none">None</button>
-    </div>`;
-  for (const pl of places) {
+    </div>
+    <p class="note" id="cookNone" style="margin:12px 4px" hidden></p>`;
+  // Every place is drawn; filterCook() shows the kitchen ones, the rest when asked for or searched.
+  for (const pl of [...kitchen, ...others]) {
     const group = have.filter((i) => shownIn(i).includes(pl)).sort(byUseBy);
     if (!group.length) continue;
-    html += `<h2 class="group">${esc(pl)}</h2><ul class="list pick-list">${group.map((it) => `
-      <li class="item pick-row ${picked.has(it.id) ? 'on' : ''}" data-pick-id="${it.id}" role="checkbox" aria-checked="${picked.has(it.id)}" tabindex="0">
+    html += `<section class="cook-group" ${others.includes(pl) ? 'data-other' : ''}><h2 class="group">${esc(pl)}</h2><ul class="list pick-list">${group.map((it) => `
+      <li class="item pick-row ${picked.has(it.id) ? 'on' : ''}" data-pick-id="${it.id}" data-find="${esc(`${it.name} ${it.brand || ''}`.toLowerCase())}" role="checkbox" aria-checked="${picked.has(it.id)}" tabindex="0">
         <span class="check" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></svg></span>
         ${thumb(it, false)}
         <div class="info"><div class="name">${esc(it.name)}</div><div class="meta">${[esc(qtyText(it)), useByHtml(it), openedText(it)].filter(Boolean).join(' · ')}</div></div>
-      </li>`).join('')}</ul>`;
+      </li>`).join('')}</ul></section>`;
   }
   if (others.length) {
     html += `<button class="link small show-others" data-cook="others">${c.others ? 'Hide' : 'Show'} ${others.map((pl) => esc(pl.toLowerCase())).join(', ')}</button>`;
@@ -709,6 +721,30 @@ function recipePrompt() {
     c.notes.trim() ? `Notes: ${c.notes.trim()}` : '',
     `Suggest 3 recipes, each with an ingredient list (amounts for ${people}) and short steps.`,
   ].filter(Boolean).join('\n\n');
+}
+
+// Narrows the ingredients as you type, in place: redrawing the page would close the keyboard.
+// Places outside the kitchen show when asked for, or when the search finds something there.
+function filterCook() {
+  const q = ui.cq.trim().toLowerCase();
+  const others = cookPrefs().others || Boolean(q);
+  let found = 0;
+  document.querySelectorAll('.cook-group').forEach((g) => {
+    let n = 0;
+    g.querySelectorAll('[data-pick-id]').forEach((row) => {
+      row.hidden = Boolean(q) && !row.dataset.find.includes(q);
+      if (!row.hidden) n++;
+    });
+    g.hidden = !n || (g.dataset.other !== undefined && !others);
+    if (!g.hidden) found += n;
+  });
+  const none = $('#cookNone');
+  if (none) {
+    none.hidden = !q || found > 0;
+    none.textContent = `Nothing in stock matches “${ui.cq.trim()}”. To use it anyway, add it under Anything else? below.`;
+  }
+  $('.cook-search .search-clear')?.toggleAttribute('hidden', !ui.cq);
+  $('.show-others')?.toggleAttribute('hidden', Boolean(q));
 }
 
 function updateCookSummary() {
@@ -749,14 +785,6 @@ $('#main').addEventListener('click', (e) => {
     return setPicked(picked.includes(id) ? picked.filter((x) => x !== id) : [...picked, id]);
   }
   const c = cookPrefs();
-  const meal = e.target.closest('[data-cook-meal]');
-  if (meal) {
-    c.meal = meal.dataset.cookMeal;
-    document.querySelectorAll('[data-cook-meal]').forEach((b) => {
-      b.classList.toggle('on', b === meal);
-      b.setAttribute('aria-checked', b === meal);
-    });
-  }
   const serve = e.target.closest('[data-cook-serve]');
   if (serve) {
     c.servings = Math.min(50, Math.max(1, c.servings + Number(serve.dataset.cookServe)));
@@ -770,11 +798,16 @@ $('#main').addEventListener('click', (e) => {
     box.setAttribute('aria-checked', !c.extras);
     box.querySelector('small').textContent = exactNote(c);
   }
-  if (meal || serve || act === 'exact') {
+  if (serve || act === 'exact') {
     savePrefs();
     return updateCookSummary();
   }
-  const shown = () => [...document.querySelectorAll('[data-pick-id]')].map((r) => r.dataset.pickId);
+  const shown = () => [...document.querySelectorAll('.cook-group:not([hidden]) [data-pick-id]:not([hidden])')].map((r) => r.dataset.pickId);
+  if (act === 'clear-search') {
+    ui.cq = '';
+    $('#cookSearch').value = '';
+    filterCook();
+  }
   if (act === 'soon') setPicked(state.items.filter(useSoon).map((i) => i.id));
   if (act === 'all') setPicked(shown());
   if (act === 'none') setPicked([]);
@@ -829,6 +862,11 @@ const readCookOption = (e) => {
 };
 $('#main').addEventListener('change', readCookOption);
 $('#main').addEventListener('input', readCookOption);
+$('#main').addEventListener('input', (e) => {
+  if (e.target.id !== 'cookSearch') return;
+  ui.cq = e.target.value;
+  filterCook();
+});
 
 // ---------- Changes ----------
 
@@ -4008,7 +4046,9 @@ $('#search').addEventListener('input', (e) => {
 
 // ✕ empties the search in one tap. Holding off the press keeps the keyboard as it was:
 // still up if you were typing, still down if you'd already put it away.
-$('#searchClear').addEventListener('mousedown', (e) => e.preventDefault());
+document.addEventListener('mousedown', (e) => {
+  if (e.target.closest('.search-clear')) e.preventDefault();
+});
 $('#searchClear').addEventListener('click', () => {
   if (ui.view === 'house') ui.hq = '';
   else ui.q = '';
