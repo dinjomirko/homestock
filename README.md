@@ -19,9 +19,9 @@ A tiny household inventory app: pantry, fridge, bathroom, garage, plus a record 
 - **Paste a list** — paste lines from Notes, a text, or receipt text copied with Live Text; review the names and add them to stock or the shopping list at once.
 - **Recipes** (own tab) — pick a category (any, breakfast, lunch, dinner, side dish, snack or dessert), the cuisine (or type your own under Other…) and how many servings, and tick *Exact ingredients only* to keep recipes to what you have, or leave it unticked to let them suggest a few extras to buy. Tick the ingredients you want to cook with, or search for one (quick picks: use soon, all shown, none), add any notes, then Copy the question or Ask Claude (opens Claude with it filled in). Your choices are remembered for next time.
 - **Photos** — scanned products bring their own; for anything else, tap the picture on the item's page to take or choose one (stored as a small thumbnail). Items without a photo show a matching emoji.
-- **Household sharing** — ⋯ → Household sharing: sign in or create an account (email + password), then start a household (you become its owner and get an 8-character code) or join one with its code. Signing in on another phone brings the household back. The owner can remove members and replace the code. Everyone sees the same stock, list, stores and places, live, and each item shows who changed it last. Works offline and catches up later. Backed by the Supabase project in `config.js`; set up with `supabase/schema.sql`.
+- **Household sharing** — ⋯ → Household sharing: sign in or create an account (email + password), then start a household (you become its owner and get an 8-character code) or join one with its code. Signing in on another phone brings the household back. The owner can remove members and replace the code. Everyone sees the same stock, list, stores and places, live, and each item shows who changed it last. Changes made at the same time on different phones are combined, never overwritten: two people each using a can count as two, a store added on one phone and a place on another both stay, and something deleted on one phone while it's being edited on another is kept. Works offline (a line under the title says so) and catches up later. Backed by the Supabase project in `config.js`; set up with `supabase/schema.sql`.
 - **Hey Siri** — ⋯ → Set up "Hey Siri, Key Record" builds a Shortcut that dictates and opens `?say=…`, which runs the command.
-- Every change can be undone. Data stays on the device (localStorage); back up/restore from the ⋯ menu.
+- **Nothing lost** — every change can be undone (Undo takes back only your own change, never someone else's). Anything deleted, here or on another phone, waits in ⋯ → Recently deleted for 30 days. Back up to a file from the ⋯ menu (items, belongings, stores, places and rooms); restoring adds back what's missing and never removes anything. Data lives on the device (localStorage) and, in a household, in the shared database.
 
 No build step. Plain HTML/CSS/JS modules, installable to the home screen and usable offline.
 
@@ -29,7 +29,7 @@ No build step. Plain HTML/CSS/JS modules, installable to the home screen and usa
 
 ```bash
 npm start        # serves on http://localhost:5190
-npm test         # voice-command parser tests
+npm test         # parser, merge and multi-phone sync tests
 npm run release  # bump the file versions — run before pushing any change
 ```
 
@@ -40,6 +40,8 @@ Camera and microphone need HTTPS, so phones use the live GitHub Pages site. Publ
 ## Files
 
 - `parser.js` — turns sentences into actions and matches names to items (pure, tested)
+- `merge.js` — combines two people's changes to the same thing (pure, tested)
+- `sync.js` — household sharing: sends changes only over the copy it last saw, merging when someone got there first (tested against a stand-in database in `test/sync.test.js`)
 - `app.js` — UI, camera scanning, voice, shopping list
 - `scan-worker.js` — barcode decoding off the main thread (ZXing, upright + rotated)
 - `sw.js`, `manifest.webmanifest` — offline + install

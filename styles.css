@@ -668,3 +668,14 @@ body { font-variant-numeric: lining-nums; }
 .unit-card > label { margin-top: 10px; }
 .unit-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 .unit-head .meta { font-size: 13px; }
+
+/* Sync status under the title, only while offline */
+.sync-pill {
+  display: flex; align-items: center; gap: 7px; margin: -4px 0 8px; padding: 2px 0; border: 0; background: none;
+  color: var(--muted); font-size: 13px; text-align: left; min-height: 24px;
+}
+.sync-pill::before { content: ""; flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--warn); }
+
+/* Recently deleted */
+.trash-list .item { gap: 10px; }
+.trash-list .btn { flex: none; }

@@ -13,5 +13,5 @@ const next = current + 1;
 
 write('sw.js', sw.replace(/const VERSION = \d+;/, `const VERSION = ${next};`));
 write('index.html', read('index.html').replace(/(app\.js|styles\.css)\?v=\d+/g, `$1?v=${next}`));
-for (const f of ['app.js', 'sync.js']) write(f, read(f).replace(/\.\/(parser|sync|config)\.js\?v=\d+/g, `./$1.js?v=${next}`));
+for (const f of ['app.js', 'sync.js']) write(f, read(f).replace(/\.\/(parser|sync|config|merge)\.js\?v=\d+/g, `./$1.js?v=${next}`));
 console.log(`Homestock version ${current} → ${next}`);

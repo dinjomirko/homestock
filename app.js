@@ -1,11 +1,12 @@
 import {
   parseCommand, resolveActions, matchItem, matchExact, guessLocation, guessEmoji, parsePack, parseListLines,
   suggestShelfLife, openLife, isoDate, DEFAULT_LOCATIONS,
-} from './parser.js?v=38';
+} from './parser.js?v=39';
 import {
   initSync, pushSoon, syncInfo, createHousehold, joinHousehold, leaveHousehold, authenticate, useHousehold, signOut,
   removeMember, newJoinCode, renameMe,
-} from './sync.js?v=38';
+} from './sync.js?v=39';
+import { mergeItem, slim } from './merge.js?v=39';
 
 const APP_VERSION = new URL(import.meta.url).searchParams.get('v') || 'dev';
 const STORAGE_KEY = 'homestock.v1';
@@ -64,13 +65,74 @@ function load(key, fallback) {
   return fallback;
 }
 
-function savePrefs() {
+const writePrefs = () => {
   try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch {}
+};
+function savePrefs() {
+  writePrefs();
   pushSoon(); // stores and places are shared with the household
 }
 
+// ---------- Keeping it safe ----------
+// Anything that leaves the lists, by any route (deleted here or on another phone, erased,
+// replaced when joining a household), waits in Recently deleted for 30 days.
+
+const TRASH_KEY = 'homestock.trash';
+const TRASH_DAYS = 30;
+let trash = load(TRASH_KEY, []);
+const allRecords = () => [...state.items, ...state.assets];
+let known = new Set(allRecords().map((r) => r.id));
+let lastRecords = new Map(allRecords().map((r) => [r.id, r]));
+
+function writeTrash() {
+  const fresh = Date.now() - TRASH_DAYS * 864e5;
+  trash = trash.filter((t) => t.at > fresh).slice(0, 500);
+  // Short on space: the oldest go first, then photos, rather than losing the list itself.
+  for (let tries = 0; tries < 12; tries++) {
+    try {
+      return localStorage.setItem(TRASH_KEY, JSON.stringify(trash));
+    } catch {
+      if (tries < 8 && trash.length > 1) trash = trash.slice(0, Math.ceil(trash.length / 2));
+      else trash = trash.map((t) => ({ ...t, item: { ...t.item, image: '', doc: '' } }));
+    }
+  }
+}
+
+function noteGone(why) {
+  const now = new Map(allRecords().map((r) => [r.id, r]));
+  const gone = [...known].filter((id) => !now.has(id)).map((id) => lastRecords.get(id)).filter(Boolean);
+  // Back again (restored, or saved after someone deleted it): no longer waiting in Recently deleted.
+  if ([...now.keys()].some((id) => !known.has(id)) && trash.some((t) => now.has(t.item.id))) {
+    trash = trash.filter((t) => !now.has(t.item.id));
+    writeTrash();
+  }
+  known = new Set(now.keys());
+  lastRecords = now;
+  if (!gone.length) return;
+  const at = Date.now();
+  const ids = new Set(gone.map((r) => r.id));
+  trash = [...gone.map((r) => ({ item: JSON.parse(JSON.stringify(r)), at, why })), ...trash.filter((t) => !ids.has(t.item.id))];
+  writeTrash();
+}
+
+let fullWarned = 0;
+// Writes the lists to this phone's storage. `why` says how anything missing went (for Recently deleted).
+function writeState(why = 'Deleted') {
+  noteGone(why);
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    return true;
+  } catch {
+    if (Date.now() - fullWarned > 60000) {
+      fullWarned = Date.now();
+      setTimeout(() => toast('Couldn’t save — this phone’s storage for Key Record is full. Remove some photos, or back up from the ⋯ menu.'), 0);
+    }
+    return false;
+  }
+}
+
 let persistAsked = false;
-function save() {
+function save(why) {
   // A dismissed low-stock item comes back once its count changes; a list-only item
   // becomes a normal stock item once you actually have some.
   for (const it of state.items) {
@@ -81,12 +143,8 @@ function save() {
     tidyEach(it);
   }
   updateBadge();
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-    pushSoon();
-  } catch {
-    setTimeout(() => toast('Couldn’t save — this phone’s storage for Key Record is full. Remove some photos, or back up from the ⋯ menu.'), 0);
-  }
+  writeState(why);
+  pushSoon(); // even if this phone's storage is full, the household still gets the change
   // Ask the browser not to clear this data when space runs low.
   if (!persistAsked) {
     persistAsked = true;
@@ -98,25 +156,72 @@ function save() {
 // Snapshot before every change so any change can be undone: 'items' (stock), 'assets' (the House
 // tab) or 'all'. Belongings are copied rather than written out, so every snapshot shares their
 // photos instead of holding its own copy.
+// Undo only takes back this phone's own changes: anything someone else changed since (it arrived
+// after the snapshot) stays as they left it.
+let remoteSeq = 0;
+const touchedAt = new Map(); // id → remoteSeq when another phone (or tab) last changed it
+function touchRemote(ids) {
+  remoteSeq++;
+  for (const id of ids) touchedAt.set(id, remoteSeq);
+}
+
 function checkpoint(what = 'items') {
-  const snap = {};
+  const snap = { seq: remoteSeq };
   if (what !== 'assets') snap.items = JSON.stringify(state.items);
   if (what !== 'items') snap.assets = state.assets.map((a) => ({ ...a, care: (a.care || []).map((c) => ({ ...c })) }));
   undoStack.push(snap);
   if (undoStack.length > 30) undoStack.shift();
 }
 
+function undoInto(before, now, seq) {
+  const changedThere = (id) => (touchedAt.get(id) || 0) > seq;
+  const was = new Map(before.map((r) => [r.id, r]));
+  const out = now.filter((r) => changedThere(r.id) || was.has(r.id)).map((r) => (changedThere(r.id) ? r : was.get(r.id)));
+  const have = new Set(out.map((r) => r.id));
+  for (const r of before) if (!have.has(r.id) && !changedThere(r.id)) out.push(r);
+  return out;
+}
+
 function undo() {
   const snap = undoStack.pop();
   if (!snap) return false;
-  if (snap.items) state.items = JSON.parse(snap.items);
-  if (snap.assets) state.assets = snap.assets;
-  save();
+  if (snap.items) state.items = undoInto(JSON.parse(snap.items), state.items, snap.seq);
+  if (snap.assets) state.assets = undoInto(snap.assets, state.assets, snap.seq);
+  save('Undone');
   return true;
 }
 
+// Put something from Recently deleted back, for everyone in the household.
+function restoreDeleted(id) {
+  const entry = trash.find((t) => t.item.id === id);
+  if (!entry) return;
+  trash = trash.filter((t) => t !== entry);
+  writeTrash();
+  if (allRecords().some((r) => r.id === id)) return toast(`${entry.item.name} is already back`);
+  checkpoint('all');
+  const r = { ...entry.item, updated: Date.now() };
+  (isAsset(r) ? state.assets : state.items).push(r);
+  ui.flash = r.id;
+  save();
+  toast(`Restored ${r.name}`, { undo: true });
+}
+
+function openTrash() {
+  const fresh = Date.now() - TRASH_DAYS * 864e5;
+  const list = trash.filter((t) => t.at > fresh);
+  openSheet(`
+    <div class="sheet-head"><h2>Recently deleted</h2><button class="link" data-close>Done</button></div>
+    <p class="note">Things removed in the last ${TRASH_DAYS} days, on this phone${syncInfo().joined ? ' or anywhere in the household' : ''}. Restore puts one back${syncInfo().joined ? ' for everyone' : ''}.</p>
+    ${list.length ? `<ul class="list trash-list" style="margin-top:12px">${list.map(({ item: r, at, why }) => `<li class="item">
+        ${isAsset(r) ? assetThumb(r) : thumb(r, false)}
+        <div class="info"><div class="name">${esc(r.name || 'Unnamed')}</div><div class="meta">${esc(why || 'Deleted')} ${esc(ago(at))}${isAsset(r) ? ' · House' : r.qty > 0 ? ` · ${esc(qtyText(r))}` : ''}</div></div>
+        <button class="btn small" data-restore="${esc(r.id)}">Restore</button>
+      </li>`).join('')}</ul>` : '<p class="note" style="margin-top:12px">Nothing deleted lately.</p>'}`);
+}
+
 function newItem(fields) {
-  const location = fields.location || 'Pantry';
+  // Pantry unless that place has been renamed or removed; then the first place there is.
+  const location = fields.location || (allLocations().includes('Pantry') || !allLocations().length ? 'Pantry' : allLocations()[0]);
   return {
     id: uid(), name: '', brand: '', barcode: '', unit: '', image: '', qty: 0, scanQty: 1, useBy: '',
     need: false, low: 0, ...fields, location, updated: Date.now(),
@@ -976,8 +1081,14 @@ function setCount(it, place = null) {
   toast(wasInStock && !inStock(it) ? `${it.name} is out — moved to the shopping list` : `${it.name}${where}: ${fmt(here)} → ${qtyText(it, at ? countAt(it, at) : it.qty)}`, { undo: true });
 }
 
+// Ticked off in the cart: what to put back if it's unticked.
+const boughtSnapshot = (it) => ({
+  qty: it.qty, need: it.need, listOnly: it.listOnly, location: it.location, useBy: it.useBy, opened: it.opened,
+  each: it.each?.map((u) => ({ ...u })), spots: it.spots && { ...it.spots },
+});
+
 function markBought(it) {
-  ui.bought.set(it.id, { qty: it.qty, need: it.need, listOnly: it.listOnly, useBy: it.useBy, opened: it.opened, each: it.each?.map((u) => ({ ...u })), spots: it.spots && { ...it.spots } });
+  ui.bought.set(it.id, boughtSnapshot(it));
   const qtyBefore = it.qty;
   it.qty = Math.max(it.qty + (it.scanQty || 1), (it.low ?? 0) + 1);
   freshUseBy(it, qtyBefore);
@@ -990,7 +1101,11 @@ function markBought(it) {
 function unmarkBought(it) {
   const before = ui.bought.get(it.id);
   ui.bought.delete(it.id);
-  if (before) Object.assign(it, before);
+  if (before) {
+    Object.assign(it, before);
+    for (const k of ['opened', 'each', 'spots', 'listOnly']) if (before[k] === undefined) delete it[k];
+    it.updated = Date.now();
+  }
   save();
 }
 
@@ -1197,7 +1312,7 @@ function applyActions(actions) {
         if (!it || !isLow(it)) it = matchExact(a.name, listed)?.item || matchItem(a.name, listed)?.item || it;
         if (!it) { problems.push(`Couldn't find “${a.name}” on the list or in stock`); continue; }
         if (isLow(it)) {
-          ui.bought.set(it.id, { qty: it.qty, need: it.need, listOnly: it.listOnly, location: it.location, useBy: it.useBy, opened: it.opened, each: it.each?.map((u) => ({ ...u })), spots: it.spots && { ...it.spots } });
+          ui.bought.set(it.id, boughtSnapshot(it));
           const qtyBefore = it.qty;
           const bought = a.qty != null ? a.qty : Math.max(it.scanQty || 1, (it.low ?? 0) + 1 - it.qty);
           // Still have some in the main place? Then what you bought goes to the place you named.
@@ -1384,13 +1499,22 @@ document.addEventListener('change', (e) => {
   sel.dataset.prev = sel.value;
 });
 
+// Saving a page that was open while someone else changed the same thing: what was changed on
+// the page wins, and their changes to everything else are kept. (Deleted meanwhile: it comes back.)
+function keepTheirs(list, before, edited) {
+  const current = list.find((r) => r.id === edited.id);
+  if (!current || current === edited) return edited;
+  return mergeItem(before, { ...edited, updated: Date.now() }, current, { absolute: true });
+}
+
 // The item editor is an ordinary page rather than an overlay: on iPhone, text fields inside
 // fixed panels end up behind the keyboard, while on a normal page Safari scrolls them into view.
 // Resolves with { item, note } when saved, or null when cancelled.
 function openEditor(item, opts = {}) {
   return new Promise((resolve) => {
     if (ui.editor) ui.editor.resolve(null);
-    ui.editor = { item, ...opts, resolve, scrollY: window.scrollY };
+    // `before`: the item as the page found it, so a save only applies what was changed here.
+    ui.editor = { item, before: slim(item), ...opts, resolve, scrollY: window.scrollY };
     $('#toast').hidden = true; // a message from before would sit over the page's buttons
     render();
     $('#main').innerHTML = renderEditor();
@@ -1898,13 +2022,13 @@ $('#main').addEventListener('submit', (e) => {
     prefs.stores.push(item.store);
     savePrefs();
   }
+  const saved = isNew ? item : keepTheirs(state.items, ui.editor.before, item);
   if (isNew) state.items.push(item);
-  // Someone else's change may have replaced this item while the page was open; this save wins.
-  else if (byId(item.id) !== item) state.items = byId(item.id) ? state.items.map((i) => (i.id === item.id ? item : i)) : [...state.items, item];
-  ui.flash = item.id;
+  else state.items = state.items.some((i) => i.id === item.id) ? state.items.map((i) => (i.id === item.id ? saved : i)) : [...state.items, saved];
+  ui.flash = saved.id;
   save();
-  closeEditor({ item, note: isNew ? `New · ${qtyText(item)}` : 'Saved' });
-  if (!fromScan) toast(isNew ? `Added ${item.name}` : 'Saved', { undo: true });
+  closeEditor({ item: saved, note: isNew ? `New · ${qtyText(saved)}` : 'Saved' });
+  if (!fromScan) toast(isNew ? `Added ${saved.name}` : 'Saved', { undo: true });
 });
 
 function openMenu() {
@@ -1925,6 +2049,7 @@ function openMenu() {
       <button data-menu="badge">Use-soon count on app icon: ${prefs.badge ? 'On' : 'Off'}</button>
       <button data-menu="sound">Scan beep: ${prefs.sound ? 'On' : 'Off'}</button>
       <p class="menu-label">Your data</p>
+      <button data-menu="trash">Recently deleted${trash.length ? ` · ${trash.length}` : ''}</button>
       <button data-menu="export">Back up to a file</button>
       <button data-menu="import">Restore from a backup file</button>
       <button data-menu="sample">Load sample items</button>
@@ -2282,7 +2407,7 @@ async function householdAction(act, id) {
       const newCode = await createHousehold(name);
       toast(`Household started. Code: ${newCode}`);
     } else {
-      const keepMine = state.items.length ? confirm(`Also add the ${state.items.length} items on this phone to the household? Cancel to use only the household’s items.`) : false;
+      const keepMine = state.items.length ? confirm(`Also add the ${state.items.length} items on this phone to the household? Cancel to use only the household’s items (this phone’s go to Recently deleted).`) : false;
       toast('Joining…');
       await joinHousehold(code, name, keepMine);
       toast('Joined — you’re now sharing');
@@ -2348,7 +2473,7 @@ async function submitAccount(form) {
     document.activeElement?.blur?.();
     ui.account = null;
     if (household && !wasJoined) {
-      const keepMine = state.items.length ? confirm(`Also add the ${state.items.length} items on this phone to your household? Cancel to use only the household’s items.`) : false;
+      const keepMine = state.items.length ? confirm(`Also add the ${state.items.length} items on this phone to your household? Cancel to use only the household’s items (this phone’s go to Recently deleted).`) : false;
       await useHousehold(household, keepMine);
     }
     render();
@@ -2375,9 +2500,8 @@ $('#main').addEventListener('submit', (e) => {
   submitAccount(e.target);
 });
 
-function persistOnly() {
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch {}
-}
+// Written without sending: for changes that came from the household, or stamps made while sending.
+const persistOnly = (why) => writeState(why);
 
 // ---------- Hey Siri ----------
 //
@@ -2441,34 +2565,50 @@ function shareShoppingList() {
   $('#sheet')._shareText = text;
 }
 
+// Everything: items, belongings, and the lists of stores, places, spots and rooms.
 function exportBackup() {
-  const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
-  const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: `key-record-${new Date().toISOString().slice(0, 10)}.json` });
+  const backup = { version: APP_VERSION, saved: new Date().toISOString(), items: state.items, assets: state.assets, settings: sharedSettings() };
+  const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
+  const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: `key-record-${todayIso()}.json` });
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
+// Restoring adds back what's missing and brings back older copies only where the backup's is
+// newer; nothing here now (or anything someone in the household added since) is removed.
 async function importBackup(file) {
+  let data;
   try {
-    const data = JSON.parse(await file.text());
+    data = JSON.parse(await file.text());
     if (!Array.isArray(data.items)) throw new Error('not a backup');
-    // Backups from before the House tab have no belongings; the ones here then stay.
-    const assets = Array.isArray(data.assets) ? data.assets : null;
-    const mine = `${state.items.length} items${assets ? ` and ${state.assets.length} things in the house` : ''}`;
-    const theirs = `${data.items.length}${assets ? ` and ${assets.length}` : ''}`;
-    if (!confirm(`Replace your ${mine} with ${theirs} from the backup?`)) return;
-    checkpoint(assets ? 'all' : 'items');
-    state = { items: data.items.filter((i) => !isAsset(i)), assets: assets || state.assets };
-    save();
-    toast('Backup restored', { undo: true });
   } catch {
-    toast("That file isn't a Key Record backup");
+    return toast("That file isn't a Key Record backup");
   }
+  const records = [...data.items, ...(Array.isArray(data.assets) ? data.assets : [])].filter((r) => r && r.id && r.name !== undefined);
+  const here = new Map(allRecords().map((r) => [r.id, r]));
+  const back = records.filter((r) => !here.has(r.id) || (r.updated || 0) > (here.get(r.id).updated || 0));
+  const settings = data.settings || {};
+  if (!back.length && !Object.keys(settings).length) return toast('Everything in that backup is already here');
+  const added = back.filter((r) => !here.has(r.id)).length;
+  if (!confirm(`Restore from this backup? ${added} missing thing${added === 1 ? '' : 's'} come${added === 1 ? 's' : ''} back${back.length > added ? ` and ${back.length - added} get${back.length - added === 1 ? 's' : ''} the backup’s newer details` : ''}. Nothing you have now is removed.`)) return;
+  checkpoint('all');
+  const restored = new Map(back.map((r) => [r.id, { ...r, updated: Date.now() }]));
+  const all = [...allRecords().map((r) => restored.get(r.id) || r), ...[...restored.values()].filter((r) => !here.has(r.id))];
+  state.items = all.filter((r) => !isAsset(r));
+  state.assets = all.filter(isAsset);
+  // Lists: anything in the backup that's missing here is added.
+  for (const key of ['stores', 'places', 'rooms']) if (Array.isArray(settings[key])) prefs[key] = [...new Set([...prefs[key], ...settings[key]])];
+  if (settings.subPlaces && typeof settings.subPlaces === 'object') {
+    for (const [pl, spots] of Object.entries(settings.subPlaces)) if (Array.isArray(spots)) prefs.subPlaces[pl] = [...new Set([...spotsIn(pl), ...spots])];
+  }
+  savePrefs();
+  save();
+  toast('Backup restored', { undo: true });
 }
 
 function loadSample() {
   checkpoint();
-  const inDays = (n) => new Date(Date.now() + n * 864e5).toISOString().slice(0, 10);
+  const inDays = dateIn;
   const s = (name, qty, unit, location, extra = {}) => newItem({ name, qty, unit, location, ...extra });
   state.items.push(
     s('Paper towels', 18, 'roll', 'Pantry', { brand: 'Bounty', scanQty: 6, low: 2, store: 'Costco', spots: { Garage: 12 } }),
@@ -3113,6 +3253,10 @@ $('#scanCard').addEventListener('click', (e) => {
   const act = e.target.closest('[data-scan]')?.dataset.scan;
   if (!act) return;
   const it = byId($('#scanCard [data-id]')?.dataset.id);
+  if (!it && ['inc', 'dec', 'edit', 'list'].includes(act)) {
+    $('#scanCard').innerHTML = '';
+    return resumeScanning();
+  }
   if (act === 'cancel') {
     lookupToken++;
     $('#scanCard').innerHTML = '';
@@ -3129,6 +3273,7 @@ $('#scanCard').addEventListener('click', (e) => {
   } else if (act === 'list') {
     checkpoint();
     it.need = !it.need;
+    it.updated = Date.now();
     save();
     showCheckCard(it, it.barcode);
   } else if (act === 'new') {
@@ -3480,7 +3625,7 @@ async function houseScan(code, raw) {
 
 function openAsset(asset, opts = {}) {
   if (!asset) return;
-  ui.assetEditor = { asset, ...opts, scrollY: window.scrollY };
+  ui.assetEditor = { asset, before: slim(asset), ...opts, scrollY: window.scrollY };
   $('#toast').hidden = true;
   render();
   $('#main').innerHTML = renderAssetEditor();
@@ -3785,9 +3930,9 @@ function saveAsset(form) {
     prefs.rooms.push(room);
     savePrefs();
   }
+  const saved = isNew ? asset : keepTheirs(state.assets, ui.assetEditor.before, asset);
   if (isNew) state.assets.push(asset);
-  // Someone else's change may have replaced this record while the page was open; this save wins.
-  else if (assetById(asset.id) !== asset) state.assets = assetById(asset.id) ? state.assets.map((x) => (x.id === asset.id ? asset : x)) : [...state.assets, asset];
+  else state.assets = state.assets.some((x) => x.id === asset.id) ? state.assets.map((x) => (x.id === asset.id ? saved : x)) : [...state.assets, saved];
   save();
   closeAsset();
   toast(isNew ? `Added ${asset.name}` : 'Saved', { undo: true });
@@ -3958,6 +4103,8 @@ $('#main').addEventListener('click', (e) => {
   const btn = e.target.closest('[data-act]');
   if (!btn || Date.now() - lastSwipeAt < 400) return;
   const item = byId(btn.closest('[data-id]')?.dataset.id);
+  // Removed on another phone while it was on screen: just show the list as it is now.
+  if (!item && ['inc', 'dec', 'count', 'pick', 'edit', 'got', 'unlist', 'pick-store', 'unbuy'].includes(btn.dataset.act)) return render();
   switch (btn.dataset.act) {
     case 'inc': return bump(item, 1, btn.dataset.place || null);
     case 'dec': return bump(item, -1, btn.dataset.place || null);
@@ -3977,7 +4124,7 @@ $('#main').addEventListener('click', (e) => {
     case 'unlist': return removeFromList(item);
     case 'pick-store': return openStorePicker(item);
     case 'unbuy': return unmarkBought(item);
-    case 'add': return openEditor(newItem({ location: KITCHEN.includes(ui.loc) || DEFAULT_LOCATIONS.includes(ui.loc) ? ui.loc : 'Pantry', qty: 1 }), { isNew: true });
+    case 'add': return openEditor(newItem({ location: allLocations().includes(ui.loc) ? ui.loc : undefined, qty: 1 }), { isNew: true });
     case 'add-named': {
       const name = sentenceCase(ui.q.trim());
       return openEditor(newItem({ name, qty: 1, location: guessLocation(name) }), { isNew: true });
@@ -4314,6 +4461,11 @@ $('#backdrop').addEventListener('click', closeSheet);
 
 $('#sheet').addEventListener('click', (e) => {
   if (e.target.closest('[data-close]')) return closeSheet();
+  const restore = e.target.closest('[data-restore]')?.dataset.restore;
+  if (restore) {
+    restoreDeleted(restore);
+    return openTrash();
+  }
   if (e.target.closest('#micBtn')) return rec ? rec.stop() : startListening();
   const example = e.target.closest('.examples button');
   if (example) {
@@ -4390,13 +4542,14 @@ $('#sheet').addEventListener('click', (e) => {
   if (m === 'household') openHousehold();
   if (m === 'siri') openSiriSetup();
   if (m === 'export') exportBackup();
+  if (m === 'trash') openTrash();
   if (m === 'import') $('#importFile').click();
   if (m === 'sample') loadSample();
-  if (m === 'erase' && confirm(`Erase every item${state.assets.length ? ' and everything on the House tab' : ''}? (You can undo right after.)`)) {
+  if (m === 'erase' && confirm(`Erase every item${state.assets.length ? ' and everything on the House tab' : ''}${syncInfo().joined ? ' for everyone in the household' : ''}? You can undo right after, or restore things from Recently deleted for ${TRASH_DAYS} days.`)) {
     checkpoint('all');
     state.items = [];
     state.assets = [];
-    save();
+    save('Erased');
     toast('Everything erased', { undo: true });
   }
 });
@@ -4461,6 +4614,39 @@ if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.
   navigator.serviceWorker.register('sw.js').catch(() => {});
 }
 
+// What's shared with the household besides the items: the lists of stores, places, spots and rooms.
+const sharedSettings = () => ({ stores: prefs.stores, places: prefs.places, subPlaces: prefs.subPlaces, rooms: prefs.rooms });
+
+// Offline (or out of the household) shows next to the title; changes stay safe on this phone.
+function showSyncStatus(status) {
+  const pill = $('#syncPill');
+  pill.hidden = status !== 'offline';
+  pill.textContent = 'Offline — changes are saved on this phone';
+}
+$('#syncPill').addEventListener('click', () => toast('Offline — everything you change is kept on this phone and shared as soon as it’s back online.'));
+
+// The app open in another tab on this device changed something: pick it up here rather than
+// writing over it later.
+addEventListener('storage', (e) => {
+  if (e.key === STORAGE_KEY && e.newValue) {
+    try {
+      const next = JSON.parse(e.newValue);
+      const before = new Map(allRecords().map((r) => [r.id, JSON.stringify(r)]));
+      const after = [...(next.items || []), ...(next.assets || [])];
+      touchRemote([...after.filter((r) => before.get(r.id) !== JSON.stringify(r)).map((r) => r.id), ...[...before.keys()].filter((id) => !after.some((r) => r.id === id))]);
+      state.items = (next.items || []).filter((r) => !isAsset(r));
+      state.assets = [...(next.assets || []), ...(next.items || []).filter(isAsset)];
+      known = new Set(allRecords().map((r) => r.id)); // that tab already noted anything it removed
+      lastRecords = new Map(allRecords().map((r) => [r.id, r]));
+      if (!ui.editor && !ui.assetEditor && !ui.paste && !ui.account) render();
+    } catch {}
+  }
+  if (e.key === PREFS_KEY && e.newValue) {
+    try { Object.assign(prefs, JSON.parse(e.newValue)); } catch {}
+  }
+  if (e.key === TRASH_KEY) trash = load(TRASH_KEY, []);
+});
+
 render();
 // Tells the startup safety net in index.html that the app is running.
 window.homestockReady = true;
@@ -4469,23 +4655,40 @@ window.homestockReady = true;
 Promise.race([
   initSync({
     // Belongings travel with the items, marked kind 'asset', and are sorted back out on arrival.
-    items: () => [...state.items, ...state.assets],
-    setItems: (all) => {
-      state.items = all.filter((i) => !isAsset(i));
-      state.assets = all.filter(isAsset);
-      persistOnly();
+    items: allRecords,
+    // Changes from the household: [{ id, item }] puts or replaces one, { id, item: null } removes it.
+    applyRemote: (changes) => {
+      touchRemote(changes.map((c) => c.id));
+      const put = new Map(changes.filter((c) => c.item).map((c) => [c.id, c.item]));
+      const drop = new Set(changes.map((c) => c.id));
+      const all = allRecords();
+      const had = new Set(all.map((r) => r.id));
+      const next = all.filter((r) => !drop.has(r.id) || put.has(r.id)).map((r) => put.get(r.id) || r);
+      for (const [id, r] of put) if (!had.has(id)) next.push(r);
+      state.items = next.filter((r) => !isAsset(r));
+      state.assets = next.filter(isAsset);
+      updateBadge();
+      persistOnly('Deleted on another phone');
     },
-    settings: () => ({ stores: prefs.stores, places: prefs.places, subPlaces: prefs.subPlaces, rooms: prefs.rooms }),
+    replaceAll: (all) => {
+      touchRemote(allRecords().map((r) => r.id));
+      state.items = all.filter((r) => !isAsset(r));
+      state.assets = all.filter(isAsset);
+      persistOnly('Replaced by the household’s items');
+      render();
+    },
+    settings: sharedSettings,
     applySettings: (data) => {
       if (Array.isArray(data.stores)) prefs.stores = data.stores;
       if (Array.isArray(data.places)) prefs.places = data.places;
       if (data.subPlaces && typeof data.subPlaces === 'object') prefs.subPlaces = data.subPlaces;
       if (Array.isArray(data.rooms)) prefs.rooms = data.rooms;
-      try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch {}
+      writePrefs();
     },
     persist: persistOnly,
     onRemote: () => !ui.editor && !ui.assetEditor && !ui.paste && !ui.account && !drag?.active && !swipe?.active && render(),
-    onStatus: () => {},
+    onStatus: showSyncStatus,
+    onRemoved: () => toast('You’re no longer in the household. This phone keeps its copy of everything.'),
   }).catch(() => {}),
   new Promise((r) => setTimeout(r, 5000)),
 ]).then(runFromLink);
