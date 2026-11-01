@@ -6,8 +6,8 @@
 // base — and only writes when the household's copy is still that one. If someone else changed it
 // in the meantime, the two are merged (merge.js) and written again, so both people's changes
 // count. Deleting something someone else has since changed keeps their version.
-import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js?v=39';
-import { slim, fingerprint, print, mergeItem, mergeSettings, newest } from './merge.js?v=39';
+import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js?v=40';
+import { slim, fingerprint, print, mergeItem, mergeSettings, newest } from './merge.js?v=40';
 
 const LIB = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm';
 const META_KEY = 'homestock.sync';
@@ -59,18 +59,31 @@ const ts = (s) => (s ? Date.parse(String(s).replace(' ', 'T').replace(/(\.\d{3})
 const sameAt = (a, b) => Boolean(a && b) && ts(a) === ts(b);
 const stamp = (prev) => new Date(Math.max(Date.now(), (ts(prev) || 0) + 1)).toISOString();
 
+// The account signed in on this phone, even before the connection is up (from the saved sign-in).
+function savedUser() {
+  try {
+    const s = JSON.parse(store.getItem('homestock.auth'));
+    return s?.user || s?.currentSession?.user || null;
+  } catch {
+    return null;
+  }
+}
+
 export const syncConfigured = () => Boolean(SUPABASE_URL && SUPABASE_ANON_KEY);
-export const syncInfo = () => ({
-  configured: syncConfigured(),
-  joined: Boolean(meta.householdId),
-  code: meta.code,
-  name: meta.name,
-  status,
-  members,
-  account: user ? { email: user.email || '', guest: Boolean(user.is_anonymous) } : null,
-  me: user?.id,
-  owner: members.some((m) => m.id === user?.id && m.role === 'owner'),
-});
+export const syncInfo = () => {
+  const u = user || savedUser();
+  return {
+    configured: syncConfigured(),
+    joined: Boolean(meta.householdId),
+    code: meta.code,
+    name: meta.name,
+    status,
+    members,
+    account: u ? { email: u.email || '', guest: Boolean(u.is_anonymous) } : null,
+    me: u?.id,
+    owner: members.some((m) => m.id === u?.id && m.role === 'owner'),
+  };
+};
 
 const FRIENDLY = [
   [/invalid login credentials/i, 'That email and password don’t match an account.'],
@@ -159,10 +172,12 @@ export async function useHousehold(h, keepMine) {
   watchConnection();
 }
 
-// Stop syncing on this phone and sign out; this phone keeps its copy of everything.
+// Stop syncing on this phone and sign out of it (only this phone, so it works offline too);
+// this phone keeps its copy of everything.
 export async function signOut() {
   stopHousehold();
-  try { await (await client()).auth.signOut(); } catch {}
+  try { await (await client()).auth.signOut({ scope: 'local' }); } catch {}
+  try { store.removeItem('homestock.auth'); } catch {}
   user = null;
 }
 

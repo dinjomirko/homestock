@@ -679,3 +679,10 @@ body { font-variant-numeric: lining-nums; }
 /* Recently deleted */
 .trash-list .item { gap: 10px; }
 .trash-list .btn { flex: none; }
+
+/* Account, at the top of the ⋯ menu and in Household sharing */
+.menu-who { margin: 6px 4px 6px; font-size: 14px; color: var(--muted); overflow-wrap: anywhere; }
+.menu-who b { color: var(--ink); font-weight: 600; }
+.account-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 8px; }
+.account-row .note { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.account-row .btn { flex: none; }

@@ -1,12 +1,12 @@
 import {
   parseCommand, resolveActions, matchItem, matchExact, guessLocation, guessEmoji, parsePack, parseListLines,
   suggestShelfLife, openLife, isoDate, DEFAULT_LOCATIONS,
-} from './parser.js?v=39';
+} from './parser.js?v=40';
 import {
   initSync, pushSoon, syncInfo, createHousehold, joinHousehold, leaveHousehold, authenticate, useHousehold, signOut,
   removeMember, newJoinCode, renameMe,
-} from './sync.js?v=39';
-import { mergeItem, slim } from './merge.js?v=39';
+} from './sync.js?v=40';
+import { mergeItem, slim } from './merge.js?v=40';
 
 const APP_VERSION = new URL(import.meta.url).searchParams.get('v') || 'dev';
 const STORAGE_KEY = 'homestock.v1';
@@ -2031,10 +2031,33 @@ $('#main').addEventListener('submit', (e) => {
   if (!fromScan) toast(isNew ? `Added ${saved.name}` : 'Saved', { undo: true });
 });
 
+// Who's signed in on this phone, with the way in or out.
+function accountMenu() {
+  const info = syncInfo();
+  if (!info.configured) return '';
+  const acct = info.account;
+  if (!acct) {
+    return `<p class="menu-label">Account</p>
+      <p class="menu-who">Not signed in. Sign in to share with your household and get back in on any phone.</p>
+      <button data-menu="signin">Sign in</button>
+      <button data-menu="signup">Create an account</button>`;
+  }
+  if (acct.guest) {
+    return `<p class="menu-label">Account</p>
+      <p class="menu-who">Using a guest sign-in from before accounts. Create an account to keep your household safe.</p>
+      <button data-menu="signup">Create an account</button>
+      <button data-menu="signin">Sign in to an account</button>`;
+  }
+  return `<p class="menu-label">Account</p>
+    <p class="menu-who">Signed in as <b>${esc(acct.email)}</b></p>
+    <button data-menu="signout">Sign out</button>`;
+}
+
 function openMenu() {
   openSheet(`
     <div class="sheet-head"><h2>Options</h2><button class="link" data-close>Done</button></div>
     <div class="menu">
+      ${accountMenu()}
       <p class="menu-label">Add</p>
       <button data-menu="add">Add an item by hand</button>
       <button data-menu="paste">Paste a list</button>
@@ -2337,7 +2360,7 @@ function openHousehold() {
       ? `<div class="card guard"><h3>Protect your household</h3>
           <p>You joined before accounts existed. Create an account (or sign in to one) so you can get back in on any phone, and so only people with accounts can join.</p>
           <div class="row-actions"><button class="btn" data-account="in">I have an account</button><button class="btn primary" data-account="up">Create account</button></div></div>`
-      : `<p class="note">Signed in as <b>${esc(acct.email)}</b>. <button class="link small" data-hh="signout">Sign out</button></p>`;
+      : `<div class="account-row"><p class="note">Signed in as <b>${esc(acct.email)}</b></p><button class="btn small" data-hh="signout">Sign out</button></div>`;
     if (!info.joined) {
       body += `<p class="note">Start a household to share your stock and list, or join one with the code someone gave you.</p>
         <div class="row-actions"><button class="btn" data-hh="join">Join with a code</button><button class="btn primary" data-hh="create">Start a household</button></div>`;
@@ -4543,6 +4566,9 @@ $('#sheet').addEventListener('click', (e) => {
   if (m === 'siri') openSiriSetup();
   if (m === 'export') exportBackup();
   if (m === 'trash') openTrash();
+  if (m === 'signin') openAccount('in');
+  if (m === 'signup') openAccount('up');
+  if (m === 'signout') householdAction('signout');
   if (m === 'import') $('#importFile').click();
   if (m === 'sample') loadSample();
   if (m === 'erase' && confirm(`Erase every item${state.assets.length ? ' and everything on the House tab' : ''}${syncInfo().joined ? ' for everyone in the household' : ''}? You can undo right after, or restore things from Recently deleted for ${TRASH_DAYS} days.`)) {
