@@ -1,16 +1,18 @@
 import {
   parseCommand, resolveActions, matchItem, matchExact, guessLocation, guessEmoji, parsePack, parseListLines,
   suggestShelfLife, openLife, isoDate, DEFAULT_LOCATIONS,
-} from './parser.js?v=30';
+} from './parser.js?v=32';
 import {
   initSync, pushSoon, syncInfo, createHousehold, joinHousehold, leaveHousehold, authenticate, useHousehold, signOut,
   removeMember, newJoinCode, renameMe,
-} from './sync.js?v=30';
+} from './sync.js?v=32';
 
 const APP_VERSION = new URL(import.meta.url).searchParams.get('v') || 'dev';
 const STORAGE_KEY = 'homestock.v1';
 const PREFS_KEY = 'homestock.prefs';
 const KITCHEN = ['Pantry', 'Fridge', 'Freezer'];
+// Kept in the kitchen but not for cooking: left out of Recipes.
+const NOT_FOOD = /\b(paper towels?|toilet paper|tissues?|napkins?|(aluminum |tin )?foil|plastic wrap|cling film|parchment|wax paper|(trash|garbage|zip ?lock|ziploc|sandwich|freezer) bags?|dish (soap|detergent)|dishwasher|detergent|sponges?|wipes|bleach|cleaner|batter(y|ies)|light ?bulbs?|matches|candles?|filters?|nails|screws|tape)\b/i;
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 
 const $ = (sel, el = document) => el.querySelector(sel);
@@ -32,7 +34,7 @@ const buzz = (ms = 30) => navigator.vibrate?.(ms);
 // ---------- State ----------
 
 let state = load(STORAGE_KEY, { items: [] });
-const prefs = { scanMode: 'add', sound: true, stores: ['Costco', 'Aldi', 'Target', 'Walmart'], places: [...DEFAULT_LOCATIONS], subPlaces: {}, folded: [], ...load(PREFS_KEY, {}) };
+const prefs = { scanMode: 'add', sound: true, stores: ['Costco', 'Aldi', 'Target', 'Walmart'], places: [...DEFAULT_LOCATIONS], subPlaces: {}, folded: [], foldedSpots: [], ...load(PREFS_KEY, {}) };
 delete prefs.shopStore; // the store filter used to be remembered between launches; now it isn't
 // shopStore: the store picked at the top of the shopping list, for this visit only.
 // select: while picking several Stock items to move together, a Map of picked rows.
@@ -190,6 +192,8 @@ function addSpot(place, spot) {
   savePrefs();
 }
 const shelfAt = (it, place) => (place === it.location ? it.shelf || '' : '');
+// A folded spot is remembered as "Place<tab>Spot".
+const spotKey = (place, spot) => `${place}\t${spot}`;
 
 // Move an item to a place (and a spot there). From a row under one place (`from`), only what's
 // kept there moves, joining whatever is already at the new place; without one, all of it moves.
@@ -212,18 +216,6 @@ function moveItem(it, from, place, spot = '') {
     else it.spots[place] = round((it.spots[place] || 0) + n);
   } else if (place === it.location) it.shelf = spot;
   it.updated = Date.now();
-}
-
-// Places and their spots as buttons, in the tray at the bottom: drop targets while dragging, or
-// one tap to move everything picked.
-function placeChoices({ current = null, adding = false } = {}) {
-  const on = (pl, sp) => (current && current.place === pl && current.spot === sp ? 'current' : '');
-  return `<div class="move-grid">${allLocations().map((pl) => `
-    <div class="move-place ${spotsIn(pl).length ? 'wide' : ''}">
-      <button type="button" class="${on(pl, '')}" data-move-place="${esc(pl)}" data-move-spot="">${esc(pl)}</button>
-      ${spotsIn(pl).length ? `<div class="move-spots">${spotsIn(pl).map((sp) => `<button type="button" class="spot ${on(pl, sp)}" data-move-place="${esc(pl)}" data-move-spot="${esc(sp)}">${esc(sp)}</button>`).join('')}</div>` : ''}
-    </div>`).join('')}
-    ${adding ? '<button type="button" class="new-place" data-move-place="__new" data-move-spot="" aria-label="New place or spot">+ New…</button>' : ''}</div>`;
 }
 
 // "Garage shelf 4", "Garage, shelf 4" or "Basement" → a place and maybe a spot in it.
@@ -342,7 +334,7 @@ function render() {
   }
   $('#main').innerHTML = ui.view === 'stock' ? renderStock() : ui.view === 'shop' ? renderShop() : renderCook();
   if (ui.view === 'cook') updateCookSummary();
-  renderPickTray();
+  renderPickBar();
   if (ui.flash) $('#main .flash')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   ui.flash = null;
 }
@@ -371,9 +363,11 @@ function itemRow(it, showLoc, place = null) {
     : showLoc ? esc(it.location) + (it.shelf ? ` · ${esc(it.shelf)}` : '') : '';
   const meta = [esc(it.brand), where, openedText(it), useByHtml(it), listed ? '<span class="warn">On list</span>' : '']
     .filter(Boolean).join(' · ');
+  // Under a place, every row is somewhere to drop: its place and spot.
+  const zone = place ? `data-drop-place="${esc(place)}" data-drop-spot="${esc(shelfAt(it, place))}"` : '';
   if (ui.select) {
     const on = ui.select.has(pickKey(it.id, place));
-    return `<li class="swipe-row" data-id="${it.id}" data-place="${esc(place || '')}">
+    return `<li class="swipe-row draggable" data-id="${it.id}" data-place="${esc(place || '')}" ${zone}>
       <button class="item pick-item ${on ? 'picked' : ''}" data-act="pick" aria-pressed="${on}">
         <span class="tick" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg></span>
         ${thumb(it, false)}
@@ -382,7 +376,7 @@ function itemRow(it, showLoc, place = null) {
       </button>
     </li>`;
   }
-  return `<li class="swipe-row swipeable" data-id="${it.id}" data-place="${esc(place || '')}" data-swipe-right="${listed ? 'unlist' : 'tolist'}" data-swipe-left="delete">
+  return `<li class="swipe-row swipeable draggable" data-id="${it.id}" data-place="${esc(place || '')}" ${zone} data-swipe-right="${listed ? 'unlist' : 'tolist'}" data-swipe-left="delete">
     <span class="swipe-label act-right ${listed ? 'off' : ''}" aria-hidden="true">${listed ? 'Off the list' : 'Add to list'}</span>
     <span class="swipe-label act-left" aria-hidden="true">Delete</span>
     <div class="item ${ui.flash === it.id ? 'flash' : ''}">
@@ -410,9 +404,16 @@ function placeList(group, place) {
   let html = '';
   for (const it of sorted) {
     const sp = shelfAt(it, place);
-    if (sp && sp !== last) html += `<li class="sub-head">${esc(sp)}</li>`;
+    const shut = sp && prefs.foldedSpots.includes(spotKey(place, sp));
+    if (sp && sp !== last) {
+      const n = sorted.filter((i) => shelfAt(i, place) === sp).length;
+      html += `<li class="sub-head" data-drop-place="${esc(place)}" data-drop-spot="${esc(sp)}">
+        <button class="fold ${shut ? 'shut' : ''}" data-fold-spot="${esc(spotKey(place, sp))}" aria-expanded="${!shut}">
+          <span>${esc(sp)}</span><span class="fold-meta">${shut ? `${n} item${n === 1 ? '' : 's'}` : ''}<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></span>
+        </button></li>`;
+    }
     last = sp;
-    html += itemRow(it, false, place);
+    if (!shut) html += itemRow(it, false, place);
   }
   return html;
 }
@@ -462,7 +463,7 @@ function renderStock() {
         // Tap a place's heading to fold it away; folding is per phone, not shared.
         const folded = prefs.folded.includes(loc);
         const allPicked = ui.select && group.every((i) => ui.select.has(pickKey(i.id, loc)));
-        return `<h2 class="group"><button class="fold ${folded ? 'shut' : ''}" data-fold="${esc(loc)}" aria-expanded="${!folded}">
+        return `<h2 class="group" data-drop-place="${esc(loc)}" data-drop-spot=""><button class="fold ${folded ? 'shut' : ''}" data-fold="${esc(loc)}" aria-expanded="${!folded}">
             <span>${esc(loc)}</span><span class="fold-meta">${folded ? `${group.length} item${group.length === 1 ? '' : 's'}` : ''}<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></span>
           </button>${ui.select ? `<button class="pick-all" data-pick-place="${esc(loc)}">${allPicked ? 'Clear' : 'Select all'}</button>` : ''}</h2>${folded ? '' : `<ul class="list stock-list">${placeList(group, loc)}</ul>`}`;
       })
@@ -474,7 +475,7 @@ function renderStock() {
   if (ui.select) return html;
   const tip = !prefs.stockSwipeTipSeen
     ? 'Swipe an item right to add it to the shopping list, or left to delete it. Press and hold to move it.'
-    : !prefs.moveTipSeen ? 'Press and hold an item to move it. Let go without dragging to pick several.' : '';
+    : !prefs.moveTipSeen ? 'Press and hold an item, then drag it onto another place or spot. Let go without dragging to pick several.' : '';
   return (tip ? `<p class="note stock-tip">${tip}</p>` : '') +
     html + listNote + `<div class="add-pair"><button class="add-row" data-act="add">+ Add an item</button><button class="add-row" data-act="paste">Paste a list</button></div>`;
 }
@@ -498,7 +499,7 @@ function renderChips() {
 function shopRow(it, bought) {
   const status = it.listOnly ? 'Not in stock' : it.qty <= 0 ? 'Out' : `${esc(qtyText(it))} left`;
   const meta = bought ? `Back in stock · ${esc(qtyText(it))}` : `${status} · ${esc(it.location)}${it.shelf ? ` · ${esc(it.shelf)}` : ''}`;
-  return `<li class="swipe-row ${bought ? '' : 'swipeable'}" data-id="${it.id}" data-swipe-left="unlist">
+  return `<li class="swipe-row ${bought ? '' : 'swipeable'}" data-id="${it.id}" data-drop-store="${esc(it.store || '')}" data-swipe-left="unlist">
     ${bought ? '' : '<span class="swipe-label act-left" aria-hidden="true">Remove</span>'}
     <div class="item ${bought ? 'bought' : ''} ${ui.flash === it.id ? 'flash' : ''}">
       <button class="check" data-act="${bought ? 'unbuy' : 'got'}" role="checkbox" aria-checked="${bought}" aria-label="${esc(it.name)}">
@@ -528,7 +529,7 @@ function renderShop() {
   const counts = {};
   all.forEach((i) => (counts[i.store || ''] = (counts[i.store || ''] || 0) + 1));
   let html = '';
-  if (all.some((i) => i.store) || sel !== 'all') {
+  if (stores.length && (all.length || sel !== 'all')) {
     const chip = (key, label, n) =>
       `<button class="chip ${sel === key ? 'on' : ''}" data-shop-store="${esc(key)}" aria-pressed="${sel === key}">${esc(label)}${n ? `<small>${n}</small>` : ''}</button>`;
     html += `<nav class="chips shop-stores" aria-label="Store">${chip('all', 'All stores', all.length)}${stores
@@ -549,7 +550,7 @@ function renderShop() {
       .concat([['Any store', visible.filter((i) => !i.store)]])
       .filter(([, g]) => g.length);
     for (const [name, g] of groups) {
-      if (groups.length > 1) html += `<h2 class="group">${esc(name)}</h2>`;
+      if (groups.length > 1) html += `<h2 class="group" data-drop-store="${esc(name === 'Any store' ? '' : name)}">${esc(name)}</h2>`;
       html += `<ul class="list shop-list">${g.sort(byPlace).map((i) => shopRow(i, false)).join('')}</ul>`;
     }
   } else if (!bought.length) {
@@ -561,7 +562,7 @@ function renderShop() {
       <p class="note" style="margin:8px 4px">Tapped one by mistake? Tap it again.</p>`;
   } else if (visible.length && !prefs.swipeTipSeen) {
     html += `<p class="note" style="margin:8px 4px">${[
-      prefs.storeTipSeen ? '' : 'Tap a store tag, or press and hold an item and drag it onto a store.',
+      prefs.storeTipSeen ? '' : 'Tap a store tag, or press and hold an item and drag it onto a store at the top.',
       prefs.swipeTipSeen ? '' : 'Swipe left or tap ✕ to take something off the list.',
     ].filter(Boolean).join(' ') || 'Tick things off as you shop.'}</p>`;
   }
@@ -591,7 +592,7 @@ function cookPicked() {
 function renderCook() {
   const c = cookPrefs();
   const picked = new Set(cookPicked());
-  const have = state.items.filter((i) => i.qty > 0);
+  const have = state.items.filter((i) => i.qty > 0 && !NOT_FOOD.test(i.name));
   if (!have.length) {
     return `<div class="empty"><div class="big">🍳</div><h2>Nothing in stock yet</h2>
       <p>Once you’ve added what’s in your kitchen, pick ingredients here to get recipe ideas.</p></div>`;
@@ -1453,14 +1454,19 @@ function openMenu() {
   openSheet(`
     <div class="sheet-head"><h2>Options</h2><button class="link" data-close>Done</button></div>
     <div class="menu">
+      <p class="menu-label">Add</p>
       <button data-menu="add">Add an item by hand</button>
       <button data-menu="paste">Paste a list</button>
-      <button data-menu="places">Places</button>
+      <p class="menu-label">Organize</p>
+      <button data-menu="places">Places & spots</button>
       <button data-menu="stores">Stores</button>
+      <p class="menu-label">Sharing</p>
       <button data-menu="household">Household sharing${syncInfo().joined ? ' · On' : ''}</button>
       <button data-menu="siri">Set up “Hey Siri, Key Record”</button>
+      <p class="menu-label">Settings</p>
       <button data-menu="badge">Use-soon count on app icon: ${prefs.badge ? 'On' : 'Off'}</button>
       <button data-menu="sound">Scan beep: ${prefs.sound ? 'On' : 'Off'}</button>
+      <p class="menu-label">Your data</p>
       <button data-menu="export">Back up to a file</button>
       <button data-menu="import">Restore from a backup file</button>
       <button data-menu="sample">Load sample items</button>
@@ -1503,7 +1509,7 @@ function openPlaces() {
   const places = allLocations();
   const count = (pl) => state.items.filter((i) => placesOf(i).includes(pl)).length;
   openSheet(`
-    <div class="sheet-head"><h2>Places</h2><button class="link" data-close>Done</button></div>
+    <div class="sheet-head"><h2>Places & spots</h2><button class="link" data-close>Done</button></div>
     <p class="note">Where things are kept. Tap a place to add spots inside it, like shelves, drawers or bins. Use the arrows to change the order.</p>
     <ul class="list" style="margin-top:12px">${places
       .map((pl, i) => `<li class="item place-row">
@@ -1548,6 +1554,7 @@ function spotAction(e) {
     checkpoint();
     for (const it of state.items) if (it.location === place && it.shelf === rename) it.shelf = to;
     prefs.subPlaces[place] = [...new Set(spotsIn(place).map((sp) => (sp === rename ? to : sp)))];
+    prefs.foldedSpots = prefs.foldedSpots.map((k) => (k === spotKey(place, rename) ? spotKey(place, to) : k));
   }
   const move = t('data-sub-move');
   if (move) {
@@ -1585,6 +1592,7 @@ function renamePlace(from, to) {
   }
   prefs.places = [...new Set(allLocations().map((pl) => (pl === from ? to : pl)))];
   prefs.folded = prefs.folded.map((pl) => (pl === from ? to : pl));
+  prefs.foldedSpots = prefs.foldedSpots.map((k) => (k.startsWith(`${from}\t`) ? `${to}${k.slice(from.length)}` : k));
 }
 
 function placeAction(e) {
@@ -2708,6 +2716,13 @@ $('#main').addEventListener('click', (e) => {
     if (!ui.select.size) ui.select = null;
     return render();
   }
+  const foldSpot = e.target.closest('[data-fold-spot]');
+  if (foldSpot) {
+    const key = foldSpot.dataset.foldSpot;
+    prefs.foldedSpots = prefs.foldedSpots.includes(key) ? prefs.foldedSpots.filter((k) => k !== key) : [...prefs.foldedSpots, key];
+    savePrefs();
+    return render();
+  }
   const fold = e.target.closest('[data-fold]');
   if (fold) {
     const place = fold.dataset.fold;
@@ -2750,89 +2765,174 @@ $('#main').addEventListener('click', (e) => {
   }
 });
 
-// Press and hold a row to pick it up, then drop it in the tray that appears at the bottom: on a
-// store (shopping list) or on a place or spot (Stock). Moving before the hold completes is a
-// normal scroll or swipe.
+// Press and hold a row, then drag it straight onto where it should go. Stock: a place or spot
+// heading, any item already there, or a place chip at the top. Shopping list: a store heading or
+// a store chip. The page scrolls when your finger nears the top or bottom. On Stock, letting go
+// where you pressed starts picking several, and dragging any picked item takes them all.
+// Moving before the hold completes is a normal scroll or swipe.
 let drag = null;
 const HOLD_MS = 350;
 
 $('#main').addEventListener('pointerdown', (e) => {
-  const row = e.target.closest('.shop-list .swipe-row.swipeable, .stock-list .swipe-row.swipeable');
+  const row = e.target.closest('.shop-list .swipe-row.swipeable, .stock-list .swipe-row.draggable');
   if (!row || e.button > 0 || e.target.closest('.stepper')) return;
-  drag = { row, id: e.pointerId, x: e.clientX, y: e.clientY, active: false, timer: setTimeout(startDrag, HOLD_MS) };
+  drag = { row, id: e.pointerId, x: e.clientX, y: e.clientY, lastX: e.clientX, lastY: e.clientY, active: false, timer: setTimeout(startDrag, HOLD_MS) };
 });
 
 function startDrag() {
   if (!drag) return;
   swipe = null;
   const { row } = drag;
-  const item = row.querySelector('.item');
-  item.style.transform = '';
-  const rect = item.getBoundingClientRect();
+  row.querySelector('.item').style.transform = '';
   drag.active = true;
-  drag.offX = drag.x - rect.left;
-  drag.offY = drag.y - rect.top;
-  drag.ghost = item.cloneNode(true);
-  drag.ghost.classList.add('drag-ghost');
-  drag.ghost.style.width = `${rect.width}px`;
+  drag.shop = Boolean(row.closest('.shop-list'));
+  drag.item = byId(row.dataset.id);
+  drag.from = row.dataset.place || null;
+  if (ui.select) {
+    const key = pickKey(drag.item.id, drag.from);
+    if (!ui.select.has(key)) {
+      ui.select.set(key, { id: drag.item.id, from: drag.from });
+      row.querySelector('.pick-item')?.classList.add('picked');
+    }
+    drag.picks = [...ui.select.values()];
+    drag.srcRows = [...document.querySelectorAll('.pick-item.picked')].map((b) => b.closest('.swipe-row'));
+  } else {
+    drag.picks = [{ id: drag.item.id, from: drag.from }];
+    drag.srcRows = [row];
+  }
+  drag.srcRows.forEach((r) => r.classList.add('drag-src'));
+  const n = new Set(drag.picks.map((p) => p.id)).size;
+  drag.ghost = document.createElement('div');
+  drag.ghost.className = 'drag-ghost';
+  drag.ghost.innerHTML = `${drag.shop ? '' : thumb(drag.item, false)}<span class="ghost-text"><b>${n > 1 ? `${n} items` : esc(drag.item.name)}</b><small></small></span>`;
   document.body.append(drag.ghost);
-  moveGhost(drag.x, drag.y);
-  row.classList.add('drag-src');
+  document.body.classList.add('dragging');
   try { row.setPointerCapture(drag.id); } catch {}
-  const tray = $('#dropTray');
-  const it = byId(row.dataset.id);
-  const place = row.dataset.place || it.location;
-  tray.innerHTML = row.closest('.shop-list')
-    ? `<p>Drop on a store</p>${storeChoices(it, 'data-drop-store')}`
-    : `<p>Drop on a place or spot · or let go to pick more</p>${placeChoices({ current: { place, spot: shelfAt(it, place) } })}`;
-  tray.hidden = false;
+  showDropChips();
+  moveGhost(drag.x, drag.y);
+  updateDrop(drag.x, drag.y);
+  drag.raf = requestAnimationFrame(autoScroll);
   buzz(25);
 }
 
-function moveGhost(x, y) {
-  // Float the item just above the finger so the store under it stays visible.
-  drag.ghost.style.transform = `translate(${x - drag.offX}px, ${y - drag.offY - 44}px) scale(.9) rotate(-1.5deg)`;
+// Every place (or store) as a chip to drop on, including empty ones the list doesn't show.
+function showDropChips() {
+  if (drag.shop) {
+    const nav = $('#main .shop-stores');
+    if (!nav) return;
+    const before = document.body.offsetHeight;
+    nav.innerHTML = ['', ...allStores()].map((st) => `<button class="chip" data-drop-store="${esc(st)}">${esc(st || 'Any store')}</button>`).join('');
+    nav.classList.add('dropping');
+    if (scrollY > 0) scrollBy(0, document.body.offsetHeight - before);
+  } else {
+    // They wrap so every place is in reach; the list is nudged so it doesn't jump under your finger.
+    const before = $('.top').offsetHeight;
+    $('#chips').innerHTML = allLocations().map((pl) => `<button class="chip" data-drop-place="${esc(pl)}" data-drop-spot="">${esc(pl)}</button>`).join('');
+    $('#chips').classList.add('dropping');
+    if (scrollY > 0) scrollBy(0, $('.top').offsetHeight - before);
+  }
 }
 
-const dropTargetAt = (x, y) => document.elementFromPoint(x, y)?.closest('[data-drop-store], #dropTray [data-move-place]');
+function moveGhost(x, y) {
+  // Float just above and left of the finger so what's under it stays visible.
+  drag.ghost.style.transform = `translate(${Math.max(8, x - 56)}px, ${y - 78}px)`;
+}
+
+function dropAt(x, y) {
+  const el = document.elementFromPoint(x, y)?.closest(drag.shop ? '[data-drop-store]' : '[data-drop-place]');
+  if (!el) return null;
+  const t = drag.shop ? { store: el.dataset.dropStore } : { place: el.dataset.dropPlace, spot: el.dataset.dropSpot || '' };
+  // Dropping one item back where it already is does nothing, so it isn't offered.
+  const { item, from, picks } = drag;
+  if (drag.shop ? t.store === (item.store || '') : picks.length === 1 && t.place === (from || item.location) && t.spot === shelfAt(item, t.place)) return null;
+  return t;
+}
+
+function updateDrop(x, y) {
+  const t = dropAt(x, y);
+  const key = t ? JSON.stringify(t) : '';
+  if (key === drag.overKey) return;
+  drag.overKey = key;
+  drag.target = t;
+  document.querySelectorAll('.drop-over').forEach((el) => el.classList.remove('drop-over'));
+  if (t) {
+    const sel = drag.shop ? `[data-drop-store="${CSS.escape(t.store)}"]` : `[data-drop-place="${CSS.escape(t.place)}"][data-drop-spot="${CSS.escape(t.spot)}"]`;
+    document.querySelectorAll(sel).forEach((el) => el.classList.add('drop-over'));
+    buzz(8);
+  }
+  drag.ghost.querySelector('small').textContent = t ? `→ ${drag.shop ? t.store || 'Any store' : t.place + (t.spot ? ` · ${t.spot}` : '')}` : '';
+}
+
+// Near the top or bottom of the list, scroll toward your finger; faster the closer it gets.
+function autoScroll() {
+  if (!drag?.active) return;
+  const top = $('.top').getBoundingClientRect().bottom;
+  const bottom = innerHeight - ($(ui.select ? '#dropTray' : '.tabbar')?.offsetHeight || 0);
+  const y = drag.lastY;
+  const edge = 70;
+  let v = 0;
+  if (y > top && y < top + edge) v = -(top + edge - y) / 4;
+  else if (y > bottom - edge) v = (y - (bottom - edge)) / 4;
+  if (v) {
+    scrollBy(0, Math.max(-20, Math.min(20, v)));
+    updateDrop(drag.lastX, drag.lastY);
+  }
+  drag.raf = requestAnimationFrame(autoScroll);
+}
 
 function endDrag() {
   if (!drag) return;
   clearTimeout(drag.timer);
+  cancelAnimationFrame(drag.raf);
   drag.ghost?.remove();
-  drag.row.classList.remove('drag-src');
+  drag.srcRows?.forEach((r) => r.classList.remove('drag-src'));
+  document.querySelectorAll('.drop-over').forEach((el) => el.classList.remove('drop-over'));
+  document.body.classList.remove('dragging');
+  $('#chips').classList.remove('dropping');
+  const wasActive = drag.active;
   drag = null;
-  renderPickTray();
+  if (!wasActive) return;
+  const before = $('.top').offsetHeight;
+  render(); // puts the chips back
+  if (scrollY > 0) scrollBy(0, $('.top').offsetHeight - before);
 }
 
-// While picking several Stock items, the tray stays put: tap where they all go.
-function renderPickTray() {
-  const tray = $('#dropTray');
-  if (drag?.active) return;
+// While picking several Stock items: a small bar in place of the tabs. Drag any picked item to
+// move them all, or choose from Move to.
+function renderPickBar() {
+  const bar = $('#dropTray');
   if (!ui.select || ui.view !== 'stock' || ui.editor || ui.paste || ui.account) {
-    tray.hidden = true;
-    tray.innerHTML = '';
-    tray.classList.remove('picking');
-    tray.setAttribute('aria-hidden', 'true');
+    bar.hidden = true;
+    bar.innerHTML = '';
+    bar.setAttribute('aria-hidden', 'true');
     return;
   }
   const n = new Set([...ui.select.values()].map((p) => p.id)).size;
-  tray.innerHTML = `<div class="tray-head"><p>${n} picked · tap where ${n === 1 ? 'it goes' : 'they go'}</p><button class="link" data-pick-done>Cancel</button></div>
-    ${placeChoices({ adding: true })}`;
-  tray.classList.add('picking');
-  tray.setAttribute('aria-hidden', 'false');
-  tray.hidden = false;
-  document.documentElement.style.setProperty('--tray-h', `${tray.offsetHeight}px`);
+  const dests = allLocations().flatMap((pl) => [[pl, ''], ...spotsIn(pl).map((sp) => [pl, sp])]);
+  bar.innerHTML = `<button class="link" data-pick-done>Cancel</button>
+    <p>${n} picked<span class="hint"> · drag to move</span></p>
+    <label class="btn primary move-to">Move to…<select data-move-to aria-label="Move ${n === 1 ? 'it' : 'them'} to">
+      <option value="" selected disabled>Move to…</option>
+      ${dests.map(([p, sp]) => `<option value="${esc(p)}\t${esc(sp)}">${esc(sp ? `${p} · ${sp}` : p)}</option>`).join('')}
+      <option value="__new">+ New place or spot…</option></select></label>`;
+  bar.setAttribute('aria-hidden', 'false');
+  bar.hidden = false;
+  document.documentElement.style.setProperty('--tray-h', `${bar.offsetHeight}px`);
 }
 
 $('#dropTray').addEventListener('click', (e) => {
-  if (!ui.select) return;
-  if (e.target.closest('[data-pick-done]')) {
+  if (ui.select && e.target.closest('[data-pick-done]')) {
     ui.select = null;
-    return render();
+    render();
   }
-  const dest = e.target.closest('[data-move-place]');
-  if (dest) moveTo([...ui.select.values()], dest.dataset.movePlace, dest.dataset.moveSpot);
+});
+
+$('#dropTray').addEventListener('change', (e) => {
+  const sel = e.target.closest('[data-move-to]');
+  if (!sel || !ui.select) return;
+  const [place, spot = ''] = sel.value === '__new' ? ['__new'] : sel.value.split('\t');
+  moveTo([...ui.select.values()], place, spot);
+  if (ui.select) sel.value = ''; // a new place was cancelled
 });
 
 $('#main').addEventListener('pointermove', (e) => {
@@ -2841,33 +2941,26 @@ $('#main').addEventListener('pointermove', (e) => {
     if (Math.hypot(e.clientX - drag.x, e.clientY - drag.y) > 8) endDrag();
     return;
   }
+  drag.lastX = e.clientX;
+  drag.lastY = e.clientY;
   moveGhost(e.clientX, e.clientY);
-  const over = dropTargetAt(e.clientX, e.clientY);
-  document.querySelectorAll('#dropTray .over').forEach((b) => b !== over && b.classList.remove('over'));
-  over?.classList.add('over');
+  updateDrop(e.clientX, e.clientY);
 });
 
 $('#main').addEventListener('pointerup', (e) => {
   if (!drag || e.pointerId !== drag.id) return;
   if (!drag.active) return endDrag();
-  const target = dropTargetAt(e.clientX, e.clientY);
-  const it = byId(drag.row.dataset.id);
-  const from = drag.row.dataset.place || null;
+  updateDrop(e.clientX, e.clientY);
+  const { target, picks, item, from, shop } = drag;
   // Let go where you pressed (on Stock): start picking, with this one picked.
-  const stayed = !target && !drag.row.closest('.shop-list') && Math.hypot(e.clientX - drag.x, e.clientY - drag.y) < 24;
-  if (stayed) {
-    ui.select = new Map([[pickKey(it.id, from), { id: it.id, from }]]);
+  if (!target && !shop && !ui.select && Math.hypot(e.clientX - drag.x, e.clientY - drag.y) < 24) {
+    ui.select = new Map([[pickKey(item.id, from), { id: item.id, from }]]);
     buzz(10);
   }
-  drag.active = false;
-  endDrag();
   lastSwipeAt = Date.now();
-  if (stayed) render();
-  else if (target?.dataset.dropStore != null) assignStore(it, target.dataset.dropStore);
-  else if (target) {
-    const { movePlace: place, moveSpot: spot } = target.dataset;
-    if (place !== (from || it.location) || spot !== shelfAt(it, place)) moveTo([{ id: it.id, from }], place, spot);
-  }
+  endDrag();
+  if (target && shop) assignStore(item, target.store);
+  else if (target) moveTo(picks, target.place, target.spot);
 });
 
 $('#main').addEventListener('pointercancel', (e) => {
