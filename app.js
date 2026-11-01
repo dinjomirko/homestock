@@ -1,16 +1,18 @@
 import {
   parseCommand, resolveActions, matchItem, matchExact, guessLocation, guessEmoji, parsePack, parseListLines,
   suggestShelfLife, openLife, isoDate, DEFAULT_LOCATIONS,
-} from './parser.js?v=32';
+} from './parser.js?v=33';
 import {
   initSync, pushSoon, syncInfo, createHousehold, joinHousehold, leaveHousehold, authenticate, useHousehold, signOut,
   removeMember, newJoinCode, renameMe,
-} from './sync.js?v=32';
+} from './sync.js?v=33';
 
 const APP_VERSION = new URL(import.meta.url).searchParams.get('v') || 'dev';
 const STORAGE_KEY = 'homestock.v1';
 const PREFS_KEY = 'homestock.prefs';
 const KITCHEN = ['Pantry', 'Fridge', 'Freezer'];
+// Rooms on the House tab: where belongings are, apart from the places stock is kept.
+const DEFAULT_ROOMS = ['Kitchen', 'Living room', 'Dining room', 'Bedroom', 'Office', 'Laundry', 'Basement', 'Garage', 'Outdoors'];
 // Kept in the kitchen but not for cooking: left out of Recipes.
 const NOT_FOOD = /\b(paper towels?|toilet paper|tissues?|napkins?|(aluminum |tin )?foil|plastic wrap|cling film|parchment|wax paper|(trash|garbage|zip ?lock|ziploc|sandwich|freezer) bags?|dish (soap|detergent)|dishwasher|detergent|sponges?|wipes|bleach|cleaner|batter(y|ies)|light ?bulbs?|matches|candles?|filters?|nails|screws|tape)\b/i;
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -33,12 +35,24 @@ const buzz = (ms = 30) => navigator.vibrate?.(ms);
 
 // ---------- State ----------
 
+const isAsset = (r) => r?.kind === 'asset';
 let state = load(STORAGE_KEY, { items: [] });
-const prefs = { scanMode: 'add', sound: true, stores: ['Costco', 'Aldi', 'Target', 'Walmart'], places: [...DEFAULT_LOCATIONS], subPlaces: {}, folded: [], foldedSpots: [], ...load(PREFS_KEY, {}) };
+// Belongings (the House tab) are kept next to stock. One that arrived among the items, from a
+// phone still on an older version, goes back with the belongings.
+state.assets = [...(state.assets || []), ...state.items.filter(isAsset)];
+state.items = state.items.filter((i) => !isAsset(i));
+const prefs = {
+  scanMode: 'add', sound: true, stores: ['Costco', 'Aldi', 'Target', 'Walmart'], places: [...DEFAULT_LOCATIONS], subPlaces: {}, folded: [], foldedSpots: [],
+  rooms: [...DEFAULT_ROOMS], foldedRooms: [], ...load(PREFS_KEY, {}),
+};
 delete prefs.shopStore; // the store filter used to be remembered between launches; now it isn't
 // shopStore: the store picked at the top of the shopping list, for this visit only.
 // select: while picking several Stock items to move together, a Map of picked rows.
-const ui = { view: 'stock', loc: 'All', q: '', bought: new Map(), flash: null, editor: null, paste: null, account: null, shopStore: 'all', select: null };
+// hq, room: search and room filter on the House tab. assetEditor: the belonging being edited.
+const ui = {
+  view: 'stock', loc: 'All', q: '', bought: new Map(), flash: null, editor: null, paste: null, account: null, shopStore: 'all', select: null,
+  hq: '', room: 'All', assetEditor: null,
+};
 const undoStack = [];
 
 function load(key, fallback) {
@@ -79,16 +93,22 @@ function save() {
   render();
 }
 
-// Snapshot before every change so any change can be undone.
-function checkpoint() {
-  undoStack.push(JSON.stringify(state.items));
+// Snapshot before every change so any change can be undone: 'items' (stock), 'assets' (the House
+// tab) or 'all'. Belongings are copied rather than written out, so every snapshot shares their
+// photos instead of holding its own copy.
+function checkpoint(what = 'items') {
+  const snap = {};
+  if (what !== 'assets') snap.items = JSON.stringify(state.items);
+  if (what !== 'items') snap.assets = state.assets.map((a) => ({ ...a, care: (a.care || []).map((c) => ({ ...c })) }));
+  undoStack.push(snap);
   if (undoStack.length > 30) undoStack.shift();
 }
 
 function undo() {
   const snap = undoStack.pop();
   if (!snap) return false;
-  state.items = JSON.parse(snap);
+  if (snap.items) state.items = JSON.parse(snap.items);
+  if (snap.assets) state.assets = snap.assets;
   save();
   return true;
 }
@@ -311,19 +331,24 @@ function ago(ts) {
 // ---------- Rendering ----------
 
 function render() {
-  document.body.classList.toggle('editing', Boolean(ui.editor || ui.paste || ui.account));
+  document.body.classList.toggle('editing', Boolean(ui.editor || ui.assetEditor || ui.paste || ui.account));
   if (ui.view !== 'stock') ui.select = null;
   document.body.classList.toggle('selecting', Boolean(ui.select));
   document.querySelectorAll('.tab').forEach((t) => {
     t.classList.toggle('on', t.dataset.view === ui.view);
     t.setAttribute('aria-current', t.dataset.view === ui.view ? 'page' : 'false');
   });
-  $('#stockTools').hidden = ui.view !== 'stock';
-  $('#title').textContent = { stock: 'Key Record', shop: 'Shopping', cook: 'Recipes' }[ui.view];
+  // Stock and House each have their own search and filters in the same header.
+  $('#stockTools').hidden = ui.view !== 'stock' && ui.view !== 'house';
+  const search = $('#search');
+  const q = ui.view === 'house' ? ui.hq : ui.q;
+  if (search.value !== q) search.value = q;
+  search.placeholder = ui.view === 'house' ? 'Search the house' : 'Search everything';
+  $('#title').textContent = { stock: 'Key Record', shop: 'Shopping', cook: 'Recipes', house: 'House' }[ui.view];
   const shopCount = shoppingItems().filter((i) => !ui.bought.has(i.id)).length;
   $('#shopBadge').hidden = !shopCount;
   $('#shopBadge').textContent = shopCount;
-  if (ui.editor) return; // the editor page owns the screen while it's open
+  if (ui.editor || ui.assetEditor) return; // an editing page owns the screen while it's open
   if (ui.paste) {
     if (!$('#pasteForm')) $('#main').innerHTML = renderPaste();
     return;
@@ -332,7 +357,7 @@ function render() {
     if (!$('#accountForm')) $('#main').innerHTML = renderAccount();
     return;
   }
-  $('#main').innerHTML = ui.view === 'stock' ? renderStock() : ui.view === 'shop' ? renderShop() : renderCook();
+  $('#main').innerHTML = { stock: renderStock, shop: renderShop, cook: renderCook, house: renderHouse }[ui.view]();
   if (ui.view === 'cook') updateCookSummary();
   renderPickBar();
   if (ui.flash) $('#main .flash')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
@@ -384,7 +409,7 @@ function itemRow(it, showLoc, place = null) {
       <button class="info" data-act="edit"><div class="name">${esc(it.name)}</div>${meta ? `<div class="meta">${meta}</div>` : ''}</button>
       <div class="stepper">
         <button data-act="dec" data-place="${esc(place || '')}" aria-label="One less ${esc(it.name)}" ${here <= 0 ? 'disabled' : ''}>−</button>
-        <span class="qty ${cls}" aria-label="${esc(qtyText(it, here))}">${fmt(here)}${it.unit ? `<small>${esc(pluralUnit(it.unit, here))}</small>` : ''}</span>
+        <span class="qty ${cls}" role="button" tabindex="0" data-act="count" data-place="${esc(place || '')}" aria-label="${esc(qtyText(it, here))}. Type the exact count">${fmt(here)}${it.unit ? `<small>${esc(pluralUnit(it.unit, here))}</small>` : ''}</span>
         <button data-act="inc" data-place="${esc(place || '')}" aria-label="One more ${esc(it.name)}">+</button>
       </div>
     </div>
@@ -443,8 +468,14 @@ function renderStock() {
     ? `<div class="card list-note"><p><b>${onListOnly.map((i) => esc(i.name)).join(', ')}</b> ${onListOnly.length === 1 ? 'is' : 'are'} out and on your shopping list.</p>
        <button class="btn small" data-act="go-shop">View shopping list</button></div>`
     : '';
+  // The search covers everything: matching belongings from the House tab show underneath.
+  const houseHits = q ? state.assets.filter((a) => assetText(a).includes(q)).sort((a, b) => a.name.localeCompare(b.name)) : [];
+  const houseNote = houseHits.length
+    ? `<h2 class="group"><span>In the house</span></h2><ul class="list house-list">${houseHits.map((a) => assetRow(a, true)).join('')}</ul>`
+    : '';
   if (!items.length) {
-    if (onListOnly.length) return listNote;
+    if (onListOnly.length) return listNote + houseNote;
+    if (q && houseNote) return `${houseNote}<button class="add-row" data-act="add-named">+ Add “${esc(ui.q.trim())}” to stock</button>`;
     if (q) {
       return `<div class="empty"><p>Nothing called “${esc(ui.q)}” yet.</p>
          <button class="btn primary" data-act="add-named">Add “${esc(ui.q.trim())}”</button></div>`;
@@ -475,9 +506,10 @@ function renderStock() {
   if (ui.select) return html;
   const tip = !prefs.stockSwipeTipSeen
     ? 'Swipe an item right to add it to the shopping list, or left to delete it. Press and hold to move it.'
-    : !prefs.moveTipSeen ? 'Press and hold an item, then drag it onto another place or spot. Let go without dragging to pick several.' : '';
+    : !prefs.moveTipSeen ? 'Press and hold an item, then drag it onto another place or spot. Let go without dragging to pick several.'
+    : !prefs.countTipSeen ? 'Counted a shelf? Tap a number to type the exact count.' : '';
   return (tip ? `<p class="note stock-tip">${tip}</p>` : '') +
-    html + listNote + `<div class="add-pair"><button class="add-row" data-act="add">+ Add an item</button><button class="add-row" data-act="paste">Paste a list</button></div>`;
+    html + listNote + houseNote + `<div class="add-pair"><button class="add-row" data-act="add">+ Add an item</button><button class="add-row" data-act="paste">Paste a list</button></div>`;
 }
 
 function renderChips() {
@@ -498,13 +530,17 @@ function renderChips() {
 
 function shopRow(it, bought) {
   const status = it.listOnly ? 'Not in stock' : it.qty <= 0 ? 'Out' : `${esc(qtyText(it))} left`;
-  const meta = bought ? `Back in stock · ${esc(qtyText(it))}` : `${status} · ${esc(it.location)}${it.shelf ? ` · ${esc(it.shelf)}` : ''}`;
+  const meta = bought ? `Back in stock${it.spots ? ' · in all' : ` · ${esc(it.location)}`}` : `${status} · ${esc(it.location)}${it.shelf ? ` · ${esc(it.shelf)}` : ''}`;
   return `<li class="swipe-row ${bought ? '' : 'swipeable'}" data-id="${it.id}" data-drop-store="${esc(it.store || '')}" data-swipe-left="unlist">
     ${bought ? '' : '<span class="swipe-label act-left" aria-hidden="true">Remove</span>'}
     <div class="item ${bought ? 'bought' : ''} ${ui.flash === it.id ? 'flash' : ''}">
       <button class="check" data-act="${bought ? 'unbuy' : 'got'}" role="checkbox" aria-checked="${bought}" aria-label="${esc(it.name)}">
         <svg viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></svg></button>
       <button class="info" data-act="edit"><div class="name">${esc(it.name)}</div><div class="meta">${meta}</div></button>
+      ${bought ? `<div class="stepper">
+        <button data-act="dec" aria-label="One less ${esc(it.name)}" ${it.qty <= 0 ? 'disabled' : ''}>−</button>
+        <span class="qty" role="button" tabindex="0" data-act="count" aria-label="${esc(qtyText(it))}. Type the exact count">${fmt(it.qty)}${it.unit ? `<small>${esc(pluralUnit(it.unit, it.qty))}</small>` : ''}</span>
+        <button data-act="inc" aria-label="One more ${esc(it.name)}">+</button></div>` : ''}
       ${bought ? '' : `<button class="store-btn" data-act="pick-store" aria-label="Store for ${esc(it.name)}: ${esc(it.store || 'any store')}">
         <span class="store-pill ${it.store ? '' : 'empty'}">${esc(it.store || '+ Store')}</span></button>`}
       ${bought ? '' : `<button class="remove" data-act="unlist" aria-label="Remove ${esc(it.name)} from the list">
@@ -559,7 +595,7 @@ function renderShop() {
   }
   if (bought.length) {
     html += `<h2 class="group"><span>In the cart · back in stock</span></h2><ul class="list shop-list">${bought.map((i) => shopRow(i, true)).join('')}</ul>
-      <p class="note" style="margin:8px 4px">Tapped one by mistake? Tap it again.</p>`;
+      <p class="note" style="margin:8px 4px">Bought a different amount? Fix the count with − and +. Tapped one by mistake? Tap it again.</p>`;
   } else if (visible.length && !prefs.swipeTipSeen) {
     html += `<p class="note" style="margin:8px 4px">${[
       prefs.storeTipSeen ? '' : 'Tap a store tag, or press and hold an item and drag it onto a store at the top.',
@@ -711,7 +747,7 @@ $('#main').addEventListener('click', (e) => {
 });
 
 $('#main').addEventListener('keydown', (e) => {
-  if ((e.key === ' ' || e.key === 'Enter') && e.target.matches('[data-pick-id]')) {
+  if ((e.key === ' ' || e.key === 'Enter') && e.target.matches('[data-pick-id], [data-asset-open], [role="button"][data-act]')) {
     e.preventDefault();
     e.target.click();
   }
@@ -740,6 +776,42 @@ function bump(it, dir, place = null) {
   buzz(15);
   save();
   if (wasInStock && !inStock(it)) toast(`${it.name} is out — moved to the shopping list`, { undo: true });
+}
+
+// "3", "2.5", "1 1/2", "½" → a count; anything else → null.
+function parseCount(s) {
+  const t = String(s).trim().replace(',', '.');
+  const glyph = Object.entries(FRACTIONS).find(([, g]) => t.endsWith(g));
+  const [, whole = '0', num, den] = (glyph ? [t, t.slice(0, -1).trim() || '0', glyph[0], '1'] : t.match(/^(?:(\d+)\s+)?(\d+)\/(\d+)$/)) || [];
+  if (num) return /^\d+$/.test(whole) && Number(den) > 0 ? round(Number(whole) + Number(num) / Number(den)) : null;
+  return /^\d*\.?\d+$/.test(t) ? round(Number(t)) : null;
+}
+
+// Type the exact count, e.g. after counting what's on the shelf. From a row under one place,
+// it's the count there.
+function setCount(it, place = null) {
+  if (!it) return;
+  const at = place && it.spots ? place : null;
+  const here = at ? countAt(it, at) : it.qty;
+  const where = at ? ` in the ${at.toLowerCase()}` : '';
+  const typed = prompt(`How many ${it.unit ? `${pluralUnit(it.unit, 2)} of ` : ''}${it.name.toLowerCase()}${where}?`, String(here));
+  if (typed == null || !typed.trim()) return;
+  const n = parseCount(typed);
+  if (n == null) return toast('Type a number, like 3, 2.5 or 1 1/2');
+  if (n === here) return;
+  checkpoint();
+  const wasInStock = inStock(it);
+  if (at) adjustAt(it, at, n - here);
+  else it.qty = n;
+  if (n > here && it.qty > (it.low ?? -1)) it.need = false;
+  it.updated = Date.now();
+  if (!prefs.countTipSeen) {
+    prefs.countTipSeen = true;
+    savePrefs();
+  }
+  buzz(15);
+  save();
+  toast(wasInStock && !inStock(it) ? `${it.name} is out — moved to the shopping list` : `${it.name}${where}: ${fmt(here)} → ${qtyText(it, at ? countAt(it, at) : it.qty)}`, { undo: true });
 }
 
 function markBought(it) {
@@ -1172,8 +1244,8 @@ function closeEditor(saved = null) {
 
 const photoTile = (image, item) =>
   image ? `<img src="${esc(image)}" alt="">` : `<span class="emoji">${guessEmoji(item.name, item.location)}</span><span class="cam">📷</span>`;
-const photoButtons = (has) =>
-  `<button type="button" class="link" data-edit="photo">${has ? 'Change photo' : 'Add photo'}</button>${has ? '<button type="button" class="link quiet" data-edit="nophoto">Remove</button>' : ''}`;
+const photoButtons = (has, attr = 'data-edit') =>
+  `<button type="button" class="link" ${attr}="photo">${has ? 'Change photo' : 'Add photo'}</button>${has ? `<button type="button" class="link quiet" ${attr}="nophoto">Remove</button>` : ''}`;
 
 // Take or choose a picture (iOS offers camera or library) and shrink it to a small square
 // thumbnail, so photos don't fill up the browser's storage.
@@ -1185,7 +1257,9 @@ function pickPhoto() {
   });
 }
 
-async function shrinkPhoto(file, size = 192) {
+// whole: keep the whole picture (a receipt or a label to read later) at most `size` across,
+// rather than a square thumbnail.
+async function shrinkPhoto(file, size = 192, whole = false) {
   const url = URL.createObjectURL(file);
   try {
     const img = await new Promise((res, rej) => {
@@ -1194,9 +1268,16 @@ async function shrinkPhoto(file, size = 192) {
       i.onerror = rej;
       i.src = url;
     });
-    const side = Math.min(img.naturalWidth, img.naturalHeight);
+    const { naturalWidth: w, naturalHeight: h } = img;
+    if (whole) {
+      const s = Math.min(1, size / Math.max(w, h));
+      const c = Object.assign(document.createElement('canvas'), { width: Math.round(w * s), height: Math.round(h * s) });
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      return c.toDataURL('image/jpeg', 0.6);
+    }
+    const side = Math.min(w, h);
     const c = Object.assign(document.createElement('canvas'), { width: size, height: size });
-    c.getContext('2d').drawImage(img, (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side, 0, 0, size, size);
+    c.getContext('2d').drawImage(img, (w - side) / 2, (h - side) / 2, side, side, 0, 0, size, size);
     return c.toDataURL('image/jpeg', 0.72);
   } finally {
     URL.revokeObjectURL(url);
@@ -1259,6 +1340,7 @@ function renderEditor() {
     ${similar ? `<div class="suggest"><span>Is this your <b>${esc(similar.name)}</b>?</span>
       <button type="button" class="btn small primary" data-edit="link" data-id="${similar.id}">Yes, same thing</button></div>` : ''}
     <label>Name<input name="name" value="${esc(item.name)}" placeholder="What is it?" autocomplete="off" enterkeyhint="done"></label>
+    ${isNew && !fromScan ? '<div id="dupHint"></div>' : ''}
     <div class="row2">
       <label>How many
         <div class="stepper big"><button type="button" data-step="-1" aria-label="One less">−</button><input name="qty" type="number" inputmode="decimal" step="any" min="0" value="${count}" aria-label="Quantity"><button type="button" data-step="1" aria-label="One more">+</button></div>
@@ -1313,6 +1395,11 @@ $('#main').addEventListener('click', (e) => {
   const act = e.target.closest('[data-edit]')?.dataset.edit;
   if (act === 'cancel') closeEditor(null);
   if (act === 'link') linkScannedTo(byId(e.target.closest('[data-id]').dataset.id));
+  if (act === 'open-existing') {
+    const existing = byId(e.target.closest('[data-id]').dataset.id);
+    closeEditor(null);
+    if (existing) openEditor(existing);
+  }
   const days = e.target.closest('[data-days]')?.dataset.days;
   if (days) form.useBy.value = days === 'clear' ? '' : dateIn(Number(days));
   const spotStep = e.target.closest('[data-spot-step]');
@@ -1385,8 +1472,22 @@ $('#main').addEventListener('change', (e) => {
 
 $('#main').addEventListener('input', (e) => {
   const form = e.target.closest('#editForm');
-  if (form && e.target.name === 'name' && ui.editor && ui.editor.photo === undefined && !ui.editor.item.image) showEditorPhoto(form);
+  if (!form || e.target.name !== 'name' || !ui.editor) return;
+  if (ui.editor.photo === undefined && !ui.editor.item.image) showEditorPhoto(form);
+  showDupHint(form);
 });
+
+// Adding by hand something already tracked would split its count in two: offer the existing one.
+function showDupHint(form) {
+  const box = $('#dupHint', form);
+  if (!box) return;
+  const name = form.name.value.trim();
+  const same = name.length > 1 ? matchExact(name, state.items)?.item : null;
+  box.innerHTML = same
+    ? `<div class="suggest"><span>You already have <b>${esc(same.name)}</b> · ${same.qty > 0 ? esc(qtyText(same)) : 'out'} in the ${esc(same.location.toLowerCase())}</span>
+       <button type="button" class="btn small primary" data-edit="open-existing" data-id="${same.id}">Open it</button></div>`
+    : '';
+}
 
 $('#main').addEventListener('submit', (e) => {
   const form = e.target;
@@ -1460,6 +1561,7 @@ function openMenu() {
       <p class="menu-label">Organize</p>
       <button data-menu="places">Places & spots</button>
       <button data-menu="stores">Stores</button>
+      <button data-menu="rooms">Rooms on the House tab</button>
       <p class="menu-label">Sharing</p>
       <button data-menu="household">Household sharing${syncInfo().joined ? ' · On' : ''}</button>
       <button data-menu="siri">Set up “Hey Siri, Key Record”</button>
@@ -1994,9 +2096,13 @@ async function importBackup(file) {
   try {
     const data = JSON.parse(await file.text());
     if (!Array.isArray(data.items)) throw new Error('not a backup');
-    if (!confirm(`Replace your ${state.items.length} items with ${data.items.length} from the backup?`)) return;
-    checkpoint();
-    state = { items: data.items };
+    // Backups from before the House tab have no belongings; the ones here then stay.
+    const assets = Array.isArray(data.assets) ? data.assets : null;
+    const mine = `${state.items.length} items${assets ? ` and ${state.assets.length} things in the house` : ''}`;
+    const theirs = `${data.items.length}${assets ? ` and ${assets.length}` : ''}`;
+    if (!confirm(`Replace your ${mine} with ${theirs} from the backup?`)) return;
+    checkpoint(assets ? 'all' : 'items');
+    state = { items: data.items.filter((i) => !isAsset(i)), assets: assets || state.assets };
     save();
     toast('Backup restored', { undo: true });
   } catch {
@@ -2042,6 +2148,7 @@ function openVoice() {
   openSheet(`
     <div class="voice">
       <div class="sheet-head"><h2>${ui.view === 'shop' ? 'What do you need?' : 'Say what changed'}</h2><button class="link" data-close>Done</button></div>
+      ${ui.view === 'house' ? '<p class="note">Voice keeps stock and the shopping list up to date. Belongings on the House tab are added by hand or by scanning.</p>' : ''}
       <button id="micBtn" class="mic" aria-label="Start or stop listening" aria-pressed="false" ${SR ? '' : 'disabled'}>
         <svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
       </button>
@@ -2222,6 +2329,7 @@ const MODE_HINTS = {
   check: 'Checking — see what you have, nothing changes',
 };
 const hint = (t) => ($('#scanHint').textContent = t);
+const scanHint = () => cam.task?.hint || MODE_HINTS[prefs.scanMode];
 
 function setScanMode(mode) {
   prefs.scanMode = mode;
@@ -2230,10 +2338,16 @@ function setScanMode(mode) {
     b.classList.toggle('on', b.dataset.mode === mode);
     b.setAttribute('aria-checked', b.dataset.mode === mode);
   });
-  if (cam.running) hint(MODE_HINTS[mode]);
+  if (cam.running) hint(scanHint());
 }
 
-async function openScanner() {
+// task: scanning for something other than stock, without the Add/Use/Check modes —
+// { house: true, hint } adds to the House tab; { fill(text), typeInstead(), hint } reads one
+// code (a model or serial number) into a field and closes.
+async function openScanner(task = null) {
+  cam.task = task;
+  $('#scanner').classList.toggle('task', Boolean(task));
+  $('#typeCodeBtn').textContent = task?.fill ? 'Type it instead' : 'Type a barcode instead';
   $('#scanner').hidden = false;
   document.body.style.overflow = 'hidden';
   $('#scanCard').innerHTML = '';
@@ -2246,9 +2360,10 @@ async function openScanner() {
   hint('Starting camera…');
   try {
     await startCamera();
-    hint(MODE_HINTS[prefs.scanMode]);
+    hint(scanHint());
   } catch (e) {
-    hint(e?.name === 'NotAllowedError' ? 'Camera access is off — allow it in Settings, or type the barcode.' : 'No camera here — type the barcode instead.');
+    const typeIt = task?.fill ? 'type it in' : 'type the barcode';
+    hint(e?.name === 'NotAllowedError' ? `Camera access is off — allow it in Settings, or ${typeIt}.` : `No camera here — ${typeIt} instead.`);
     showManual();
   }
 }
@@ -2405,7 +2520,7 @@ function accept(text, format, trusted) {
   }
   cam.lastCode = code;
   cam.lastSeen = now;
-  handleCode(code);
+  handleCode(code, String(text).trim());
 }
 
 function scanFeedback() {
@@ -2450,6 +2565,8 @@ async function closeScanner() {
   cam.stream = cam.track = null;
   cam.busy = false;
   cam.lastCode = '';
+  cam.task = null;
+  $('#scanner').classList.remove('task');
   $('#camera').srcObject = null;
   audioCtx?.suspend().catch(() => {});
   $('#scanner').hidden = true;
@@ -2464,6 +2581,11 @@ function showManual() {
 
 // The system prompt handles the keyboard better than a field inside the camera screen.
 function typeBarcode() {
+  const task = cam.task;
+  if (task?.fill) {
+    closeScanner();
+    return task.typeInstead?.();
+  }
   const code = normCode(prompt('Type the barcode number') || '');
   if (!code) return;
   cam.lastCode = code;
@@ -2471,7 +2593,15 @@ function typeBarcode() {
   handleCode(code);
 }
 
-async function handleCode(code) {
+// raw: the code exactly as read (a serial number keeps its leading zeros and letters).
+async function handleCode(code, raw = code) {
+  if (cam.task?.fill) {
+    scanFeedback();
+    const { fill } = cam.task;
+    closeScanner();
+    return fill(raw);
+  }
+  if (cam.task?.house) return houseScan(code, raw);
   scanFeedback();
   const item = findByCode(code);
   if (prefs.scanMode === 'check') return showCheckCard(item, code);
@@ -2684,10 +2814,748 @@ async function lookupBarcode(code) {
   if (!hit) {
     const u = await fetchJSON(`https://api.upcitemdb.com/prod/trial/lookup?upc=${encodeURIComponent(code)}`);
     const it = u?.items?.[0];
-    if (it?.title) hit = { name: it.title, brand: it.brand || '', size: it.size || '', image: it.images?.[0] || '', category: it.category || '', kind: 'product' };
+    if (it?.title) hit = { name: it.title, brand: it.brand || '', model: it.model || '', size: it.size || '', image: it.images?.[0] || '', category: it.category || '', kind: 'product' };
   }
   lookupCache.set(code, hit);
   return hit;
+}
+
+// ---------- House ----------
+//
+// Belongings kept for the record rather than counted: appliances, furniture, electronics and the
+// like, with what a repair, a warranty claim or an insurance claim asks for (model and serial
+// numbers, when it was bought and for how much, a receipt or label photo) and upkeep reminders.
+// They sync with the household as items of kind 'asset' but live on their own tab.
+
+const CATEGORIES = ['Appliances', 'Electronics', 'Furniture', 'Home systems', 'Tools', 'Outdoor & garden', 'Decor & art', 'Jewelry & valuables', 'Sports & hobbies', 'Other'];
+const CATEGORY_HINTS = [
+  [/\b(fridge|refrigerator|freezer|dishwasher|washer|washing machine|dryer|oven|range|stove|cooktop|microwave|range hood|toaster|blender|mixer|kettle|coffee maker|espresso|vacuum|dehumidifier|humidifier|air fryer|disposal)\b/, 'Appliances'],
+  [/\b(furnace|boiler|water heater|water softener|air conditioner|ac unit|heat pump|hvac|thermostat|sump pump|generator|garage door opener|smoke (detector|alarm)|carbon monoxide|alarm system|solar)\b/, 'Home systems'],
+  [/\b(tv|television|laptop|computer|macbook|imac|desktop|monitor|ipad|tablet|iphone|phone|camera|speaker|sonos|headphones|airpods|console|playstation|xbox|nintendo|router|modem|printer|projector|receiver|soundbar)\b/, 'Electronics'],
+  [/\b(sofa|couch|sectional|loveseat|chairs?|table|desk|bed|mattress|dresser|nightstand|bookcase|bookshelf|cabinet|wardrobe|armoire|ottoman|bench|stool|rug|crib|futon|recliner)\b/, 'Furniture'],
+  [/\b(drill|saw|sander|grinder|wrench|toolbox|tools?|ladder|compressor|welder|nailer|workbench|socket set)\b/, 'Tools'],
+  [/\b(mower|trimmer|edger|leaf blower|snow ?blower|grill|bbq|smoker|patio|hose|wheelbarrow|chainsaw|pressure washer)\b/, 'Outdoor & garden'],
+  [/\b(painting|artwork|sculpture|vase|mirror|lamp|chandelier|clock)\b/, 'Decor & art'],
+  [/\b(ring|necklace|bracelet|earrings|jewelry|jewellery|diamond|pearls?)\b/, 'Jewelry & valuables'],
+  [/\b(bike|bicycle|kayak|treadmill|peloton|weights|golf|skis?|snowboard|guitar|piano|violin)\b/, 'Sports & hobbies'],
+];
+const guessCategory = (text) => CATEGORY_HINTS.find(([re]) => re.test(String(text || '').toLowerCase()))?.[1] || '';
+const ASSET_EMOJI = [
+  [/\b(fridge|refrigerator|freezer)\b/, '🧊'], [/\bdishwasher\b/, '🍽️'], [/\b(washer|washing machine|dryer)\b/, '🧺'],
+  [/\b(oven|range|stove|cooktop|microwave|air fryer|toaster)\b/, '🍳'], [/\b(coffee|espresso|kettle)\b/, '☕'], [/\bvacuum\b/, '🧹'],
+  [/\b(tv|television|projector)\b/, '📺'], [/\b(laptop|computer|macbook|imac|desktop|monitor)\b/, '💻'], [/\b(phone|iphone|ipad|tablet)\b/, '📱'],
+  [/\bcamera\b/, '📷'], [/\b(speaker|sonos|soundbar|headphones|airpods|receiver)\b/, '🔊'], [/\b(console|playstation|xbox|nintendo)\b/, '🎮'],
+  [/\b(router|modem)\b/, '📶'], [/\bprinter\b/, '🖨️'], [/\b(sofa|couch|sectional|loveseat|recliner)\b/, '🛋️'], [/\b(bed|mattress|crib|futon)\b/, '🛏️'],
+  [/\b(chairs?|stool|bench)\b/, '🪑'], [/\b(lamp|chandelier)\b/, '💡'], [/\b(furnace|boiler|water heater|fireplace)\b/, '🔥'],
+  [/\b(air conditioner|ac unit|hvac|heat pump)\b/, '❄️'], [/\bthermostat\b/, '🌡️'], [/\b(smoke|carbon monoxide|alarm)\b/, '🚨'], [/\bladder\b/, '🪜'],
+  [/\b(drill|saw|sander|grinder|wrench|toolbox|tools?)\b/, '🔧'], [/\b(mower|trimmer|blower|chainsaw)\b/, '🌱'], [/\b(grill|bbq|smoker)\b/, '🍖'],
+  [/\b(bike|bicycle)\b/, '🚲'], [/\b(guitar|piano|violin)\b/, '🎸'], [/\b(ring|necklace|bracelet|earrings|jewelry|jewellery)\b/, '💍'],
+  [/\b(watch|clock)\b/, '⌚'], [/\b(painting|artwork|sculpture)\b/, '🖼️'], [/\bmirror\b/, '🪞'], [/\b(table|desk)\b/, '🪵'],
+  [/\b(dresser|cabinet|bookcase|bookshelf|wardrobe)\b/, '🗄️'],
+];
+const CATEGORY_EMOJI = {
+  Appliances: '🔌', Electronics: '💻', Furniture: '🛋️', 'Home systems': '🏠', Tools: '🔧', 'Outdoor & garden': '🌿',
+  'Decor & art': '🖼️', 'Jewelry & valuables': '💎', 'Sports & hobbies': '⚽', Other: '📦',
+};
+const assetEmoji = (a) => ASSET_EMOJI.find(([re]) => re.test(String(a.name || '').toLowerCase()))?.[1] || CATEGORY_EMOJI[a.category] || '📦';
+const assetThumb = (a) =>
+  `<div class="thumb" aria-hidden="true">${a.image ? `<img src="${esc(a.image)}" alt="" loading="lazy">` : `<span class="emoji">${assetEmoji(a)}</span>`}</div>`;
+const assetTile = (image, a) => (image ? `<img src="${esc(image)}" alt="">` : `<span class="emoji">${assetEmoji(a)}</span><span class="cam">📷</span>`);
+
+// Typical upkeep, offered as one-tap reminders once the name says what it is: [task, every N months].
+const CARE_HINTS = [
+  [/\b(furnace|hvac|air handler|heat pump)\b/, [['Replace air filter', 3], ['Yearly service', 12]]],
+  [/\b(air conditioner|ac unit)\b/, [['Yearly service', 12]]],
+  [/\b(fridge|refrigerator)\b/, [['Replace water filter', 6], ['Clean coils', 12]]],
+  [/\bdishwasher\b/, [['Clean the filter', 3]]],
+  [/\bdryer\b/, [['Clean the dryer vent', 12]]],
+  [/\b(washer|washing machine)\b/, [['Clean drum and door seal', 1]]],
+  [/\bwater heater\b/, [['Flush the tank', 12]]],
+  [/\bwater softener\b/, [['Add salt', 2]]],
+  [/\b(range hood|hood)\b/, [['Clean grease filter', 3]]],
+  [/\b(smoke|carbon monoxide)\b/, [['Test the alarm', 1], ['Replace battery', 12]]],
+  [/\bsump pump\b/, [['Test the pump', 3]]],
+  [/\b(fireplace|chimney)\b/, [['Chimney sweep', 12]]],
+  [/\bgarage door\b/, [['Lubricate rollers and springs', 6]]],
+  [/\bmattress\b/, [['Rotate', 6]]],
+  [/\b(mower|snow ?blower|generator)\b/, [['Service before the season', 12]]],
+  [/\bhumidifier\b/, [['Replace the pad', 12]]],
+];
+const CARE_EVERY = [1, 2, 3, 4, 6, 12, 24];
+const everyText = (m) => (m === 1 ? 'every month' : m === 12 ? 'every year' : m === 24 ? 'every 2 years' : `every ${m} months`);
+const HOUSE_SCAN = { house: true, hint: 'Scan the barcode on its box or manual — or the one by the serial number' };
+
+const assetById = (id) => state.assets.find((a) => a.id === id);
+const assetValue = (a) => (a.price || 0) * (a.qty || 1);
+const assetText = (a) => [a.name, a.brand, a.model, a.serial, a.room, a.category, a.store, a.notes].join(' ').toLowerCase();
+const money = (n) => n.toLocaleString(undefined, { style: 'currency', currency: 'USD', minimumFractionDigits: n % 1 ? 2 : 0, maximumFractionDigits: 2 });
+const tidyCode = (s) => String(s || '').trim().replace(/\s+/g, ' ');
+// Two serial numbers are the same whatever their spacing, dashes or letter case.
+const codeKey = (s) => s.toUpperCase().replace(/[\s-]/g, '');
+// "S/N: 4AB12" read off a label → "4AB12" (only a label followed by a colon or #, or "S/N ").
+const cleanCode = (s) => tidyCode(s).replace(/^(?:(?:s\/n|sn|ser(?:ial)?(?:\s*(?:no|number))?\.?|m\/n|mod(?:el)?(?:\s*(?:no|number))?\.?)\s*[:#]\s*|s\/n\s+)/i, '');
+
+function newAsset(fields = {}) {
+  return {
+    id: uid(), kind: 'asset', name: '', room: '', category: '', brand: '', model: '', serial: '', qty: 1, bought: '', price: null,
+    store: '', warranty: '', link: '', notes: '', image: '', doc: '', barcode: '', care: [], ...fields, updated: Date.now(),
+  };
+}
+
+function allRooms() {
+  return [...new Set([...prefs.rooms, ...state.assets.map((a) => a.room).filter(Boolean)])];
+}
+
+// "$1,299.99" → 1299.99; blank → null; anything else → NaN, so a typo is caught rather than saved.
+function parsePrice(s) {
+  const t = String(s || '').replace(/[$\s,]/g, '');
+  if (!t) return null;
+  return /^(\d+(\.\d{0,2})?|\.\d{1,2})$/.test(t) ? Number(t) : NaN;
+}
+
+function addMonths(iso, n) {
+  const [y, m, d] = iso.split('-').map(Number);
+  return isoDate(new Date(y, m - 1 + n, Math.min(d, new Date(y, m + n, 0).getDate())));
+}
+const daysUntil = (iso) => Math.round((new Date(iso + 'T00:00') - new Date(todayIso() + 'T00:00')) / 864e5);
+const shortDate = (iso, year = false) => new Date(iso + 'T00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric', ...(year && { year: 'numeric' }) });
+const monthYear = (iso) => new Date(iso + 'T00:00').toLocaleDateString(undefined, { month: 'short', year: 'numeric' });
+
+// Upkeep comes due a set time after it was last done, or after the reminder was added.
+const careDue = (c) => addMonths(c.last || c.from || todayIso(), c.every || 12);
+function dueHtml(due) {
+  const n = daysUntil(due);
+  if (n < -30) return `<span class="bad">Overdue since ${shortDate(due)}</span>`;
+  if (n < 0) return `<span class="bad">Overdue ${-n} day${n === -1 ? '' : 's'}</span>`;
+  if (n === 0) return '<span class="bad">Due today</span>';
+  if (n <= 14) return `<span class="warn">Due in ${n} day${n === 1 ? '' : 's'}</span>`;
+  return `Next ${shortDate(due)}`;
+}
+
+// Upkeep due within two weeks (or overdue) and warranties ending within two months.
+function attention() {
+  const list = [];
+  for (const a of state.assets) {
+    for (const c of a.care || []) {
+      const due = careDue(c);
+      if (daysUntil(due) <= 14) list.push({ a, c, due });
+    }
+    if (a.warranty && daysUntil(a.warranty) >= 0 && daysUntil(a.warranty) <= 60) list.push({ a, due: a.warranty });
+  }
+  return list.sort((x, y) => x.due.localeCompare(y.due));
+}
+
+function assetRow(a, showRoom = false) {
+  const made = [a.brand, a.model].filter(Boolean).join(' ');
+  const covered = a.warranty && daysUntil(a.warranty) >= 0;
+  const meta = [a.qty > 1 ? `×${a.qty}` : '', showRoom ? esc(a.room || 'No room set') : '', esc(made || a.category || ''), covered ? `Warranty to ${monthYear(a.warranty)}` : '']
+    .filter(Boolean).join(' · ');
+  return `<li class="item asset-row" data-asset-open="${a.id}" role="button" tabindex="0">
+    ${assetThumb(a)}
+    <div class="info"><div class="name">${esc(a.name)}</div>${meta ? `<div class="meta">${meta}</div>` : ''}</div>
+    ${a.price != null ? `<span class="value">${money(assetValue(a))}</span>` : ''}
+  </li>`;
+}
+
+function attentionList(due) {
+  return `<h2 class="group"><span>Needs attention</span></h2><ul class="list house-list">${due
+    .map(({ a, c, due: d }) => (c
+      ? `<li class="item att-row">${assetThumb(a)}
+          <button class="info" data-asset-open="${a.id}"><div class="name">${esc(c.task)}</div><div class="meta">${esc(a.name)} · ${dueHtml(d)}</div></button>
+          <button class="btn small" data-care-done="${a.id}" data-care="${esc(c.id)}">Done</button></li>`
+      : `<li class="item att-row">${assetThumb(a)}
+          <button class="info" data-asset-open="${a.id}"><div class="name">${esc(a.name)}</div>
+            <div class="meta"><span class="warn">Warranty ends ${shortDate(d)}</span> · ${daysUntil(d)} day${daysUntil(d) === 1 ? '' : 's'} left</div></button></li>`))
+    .join('')}</ul>`;
+}
+
+function renderRoomChips() {
+  const counts = {};
+  state.assets.forEach((a) => (counts[a.room || ''] = (counts[a.room || ''] || 0) + 1));
+  const rooms = [...allRooms(), ''].filter((r) => counts[r]);
+  const due = attention().length;
+  if (ui.room === 'attention' && !due) ui.room = 'All';
+  if (ui.room !== 'All' && ui.room !== 'attention' && !counts[ui.room]) ui.room = 'All';
+  const chip = (key, label, n, extra = '') =>
+    `<button class="chip ${extra} ${ui.room === key ? 'on' : ''}" data-room="${esc(key)}" aria-pressed="${ui.room === key}">${esc(label)}${n ? `<small>${n}</small>` : ''}</button>`;
+  $('#chips').innerHTML = rooms.length < 2 && !due ? '' : [
+    chip('All', 'All', 0),
+    due ? chip('attention', 'Needs attention', due, 'soon') : '',
+    ...rooms.map((r) => chip(r, r || 'No room set', counts[r])),
+  ].join('');
+}
+
+function renderHouse() {
+  renderRoomChips();
+  if (!state.assets.length) {
+    return `<div class="empty">
+      <div class="big">🏡</div>
+      <h2>Your house, on record</h2>
+      <p>Keep appliances, furniture, electronics and other belongings here with their model and serial numbers,
+      receipts, warranties and upkeep, ready for a repair or an insurance claim.</p>
+      <div class="buttons">
+        <button class="btn primary" data-house="add">Add something</button>
+        <button class="btn" data-house="scan">Scan a barcode</button>
+      </div>
+    </div>`;
+  }
+  const q = ui.hq.trim().toLowerCase();
+  const byName = (x, y) => x.name.localeCompare(y.name);
+  const add = `<button class="add-row" data-house="add">+ Add something</button>`;
+  if (q) {
+    const hits = state.assets.filter((a) => assetText(a).includes(q)).sort(byName);
+    return hits.length
+      ? `<ul class="list house-list" style="margin-top:12px">${hits.map((a) => assetRow(a, true)).join('')}</ul>${add}`
+      : `<div class="empty"><p>Nothing in the house matches “${esc(ui.hq)}”.</p>
+         <button class="btn primary" data-house="add-named">Add “${esc(ui.hq.trim())}”</button></div>`;
+  }
+  const due = attention();
+  if (ui.room === 'attention') return attentionList(due);
+  if (ui.room !== 'All') {
+    const group = state.assets.filter((a) => (a.room || '') === ui.room).sort(byName);
+    return `<ul class="list house-list" style="margin-top:12px">${group.map((a) => assetRow(a)).join('')}</ul>${add}`;
+  }
+  const total = state.assets.reduce((s, a) => s + assetValue(a), 0);
+  const unpriced = state.assets.filter((a) => a.price == null).length;
+  let html = `<div class="card house-sum">
+      <div><b>${state.assets.length}</b> thing${state.assets.length === 1 ? '' : 's'} · <b>${money(total)}</b> recorded
+        ${unpriced ? `<p>${unpriced === state.assets.length ? 'No prices yet' : `${unpriced} without a price`}</p>` : ''}</div>
+      <button class="btn small" data-house="export">Share</button>
+    </div>`;
+  if (due.length) html += attentionList(due);
+  for (const room of [...allRooms(), '']) {
+    const group = state.assets.filter((a) => (a.room || '') === room);
+    if (!group.length) continue;
+    // Tap a room's heading to fold it away; like places, folding is per phone.
+    const folded = prefs.foldedRooms.includes(room);
+    html += `<h2 class="group"><button class="fold ${folded ? 'shut' : ''}" data-fold-room="${esc(room)}" aria-expanded="${!folded}">
+        <span>${esc(room || 'No room set')}</span><span class="fold-meta">${folded ? `${group.length} thing${group.length === 1 ? '' : 's'}` : ''}<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></span>
+      </button></h2>${folded ? '' : `<ul class="list house-list">${group.sort(byName).map((a) => assetRow(a)).join('')}</ul>`}`;
+  }
+  return html + add;
+}
+
+// Clicks on the House tab, and on belongings shown in a Stock search. True when handled.
+function houseClick(e) {
+  if (e.target.closest('#assetForm')) return false;
+  const done = e.target.closest('[data-care-done]');
+  if (done) {
+    careDone(assetById(done.dataset.careDone), done.dataset.care);
+    return true;
+  }
+  const open = e.target.closest('[data-asset-open]');
+  if (open) {
+    const a = assetById(open.dataset.assetOpen);
+    if (a) openAsset(a);
+    return true;
+  }
+  const fold = e.target.closest('[data-fold-room]');
+  if (fold) {
+    const room = fold.dataset.foldRoom;
+    prefs.foldedRooms = prefs.foldedRooms.includes(room) ? prefs.foldedRooms.filter((r) => r !== room) : [...prefs.foldedRooms, room];
+    savePrefs();
+    render();
+    return true;
+  }
+  const act = e.target.closest('[data-house]')?.dataset.house;
+  if (!act) return false;
+  if (act === 'add') openAsset(newAsset({ room: ui.room !== 'All' && ui.room !== 'attention' ? ui.room : '' }), { isNew: true });
+  if (act === 'add-named') openAsset(newAsset({ name: ui.hq.trim(), category: guessCategory(ui.hq) }), { isNew: true });
+  if (act === 'scan') openScanner(HOUSE_SCAN);
+  if (act === 'export') openHouseExport();
+  return true;
+}
+
+function careDone(a, careId) {
+  const c = a?.care?.find((x) => x.id === careId);
+  if (!c) return;
+  checkpoint('assets');
+  c.last = todayIso();
+  a.updated = Date.now();
+  buzz(15);
+  save();
+  toast(`${c.task} done · next ${shortDate(careDue(c), true)}`, { undo: true });
+}
+
+function deleteAsset(a) {
+  checkpoint('assets');
+  state.assets = state.assets.filter((x) => x.id !== a.id);
+  buzz(20);
+  save();
+  toast(`Deleted ${a.name}`, { undo: true });
+}
+
+// From the House tab: a product barcode is looked up and starts a new record; any other code
+// (like the one by a serial number) starts one with that serial number. Something already
+// recorded opens instead.
+async function houseScan(code, raw) {
+  scanFeedback();
+  const known = state.assets.find((a) => a.barcode && normCode(a.barcode) === code);
+  if (known) {
+    closeScanner();
+    toast(`Already in the house: ${known.name}`);
+    return openAsset(known);
+  }
+  const product = /^\d{8,14}$/.test(code);
+  let info = null;
+  if (product) {
+    pauseScanning();
+    const token = ++lookupToken;
+    $('#scanCard').innerHTML = `
+      <div class="result"><div class="thumb" aria-hidden="true">🔎</div>
+        <div class="info"><div class="name">Looking it up…</div><div class="skeleton" style="margin-top:8px;width:70%"></div></div></div>
+      <div class="result-actions"><button class="btn" data-scan="cancel">Cancel</button></div>`;
+    info = await lookupBarcode(code);
+    if (token !== lookupToken) return;
+  }
+  closeScanner();
+  const name = info?.name || '';
+  openAsset(newAsset({
+    name, brand: info?.brand || '', model: info?.model || '', image: info?.image || '',
+    barcode: product ? code : '', serial: product ? '' : cleanCode(raw), category: guessCategory(`${name} ${info?.category || ''}`),
+  }), {
+    isNew: true,
+    hint: !product ? `Read ${cleanCode(raw)} — it’s in Serial number below. Check it matches the label.`
+      : info ? 'Found online. Check the details, then add the serial number.' : 'Not found online — fill in what you know.',
+  });
+}
+
+// ---------- House: the page for one belonging ----------
+
+function openAsset(asset, opts = {}) {
+  if (!asset) return;
+  ui.assetEditor = { asset, ...opts, scrollY: window.scrollY };
+  $('#toast').hidden = true;
+  render();
+  $('#main').innerHTML = renderAssetEditor();
+  updateAssetNotes($('#assetForm'));
+  window.scrollTo(0, 0);
+}
+
+function closeAsset() {
+  const ed = ui.assetEditor;
+  if (!ed) return;
+  ui.assetEditor = null;
+  document.activeElement?.blur?.();
+  render();
+  window.scrollTo(0, ed.scrollY);
+}
+
+const codeField = (name, value, label) => `<div class="code-field">
+    <input name="${name}" class="code" value="${esc(value)}" autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false" enterkeyhint="done">
+    <button type="button" class="scan-mini" data-scan-into="${name}" aria-label="Scan the ${label} barcode"><svg viewBox="0 0 24 24"><path d="M3 7V4h3M18 4h3v3M21 17v3h-3M6 20H3v-3M7 8v8M10 8v8M13 8v8M16.5 8v8"/></svg></button>
+  </div>`;
+
+const careRow = (c) => `<div class="care-row" data-care-id="${esc(c.id)}" data-from="${esc(c.from || todayIso())}">
+    <input class="care-task" value="${esc(c.task)}" placeholder="What needs doing" aria-label="Upkeep task" autocomplete="off" enterkeyhint="done">
+    <button type="button" class="remove" data-care-del aria-label="Remove this reminder"><svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17"/></svg></button>
+    <label>Every<select class="care-every">${CARE_EVERY.map((m) => `<option value="${m}" ${m === c.every ? 'selected' : ''}>${m === 1 ? 'Month' : m === 12 ? 'Year' : m === 24 ? '2 years' : `${m} months`}</option>`).join('')}</select></label>
+    <label>Last done<input type="date" class="care-last" value="${esc(c.last || '')}" max="${todayIso()}"></label>
+    <button type="button" class="link small" data-care-today>Today</button>
+  </div>`;
+
+function careSuggestHtml(text, have) {
+  const t = String(text || '').toLowerCase();
+  const taken = new Set(have.map((x) => x.toLowerCase()));
+  const tips = CARE_HINTS.filter(([re]) => re.test(t)).flatMap(([, tasks]) => tasks).filter(([task]) => !taken.has(task.toLowerCase()));
+  return tips.length
+    ? `<div class="quick-dates care-suggest">${tips.map(([task, every]) => `<button type="button" data-care-suggest="${esc(task)}" data-every="${every}">+ ${esc(task)}, ${everyText(every)}</button>`).join('')}</div>`
+    : '';
+}
+
+const docHtml = (doc) => (doc
+  ? `<div class="doc-row"><button type="button" class="doc-tile" data-asset="doc-view" aria-label="See the receipt or label photo"><img src="${esc(doc)}" alt=""></button>
+      <div class="photo-actions"><button type="button" class="link" data-asset="doc">Replace</button><button type="button" class="link quiet" data-asset="nodoc">Remove</button></div></div>`
+  : '<button type="button" class="add-row doc-add" data-asset="doc">+ Photo of the receipt or label</button>');
+
+function renderAssetEditor() {
+  const { asset: a, isNew, hint } = ui.assetEditor;
+  const today = todayIso();
+  const stores = [...new Set([...state.assets.map((x) => x.store).filter(Boolean), ...prefs.stores])];
+  const category = a.category || guessCategory(a.name) || 'Other';
+  const manual = [a.brand, a.model].filter(Boolean).join(' ');
+  return `<form class="form editor" id="assetForm" novalidate>
+    <div class="page-head">
+      <button type="button" class="link" data-asset="cancel">Cancel</button>
+      <h2>${isNew ? 'Add to the house' : 'Details'}</h2>
+      <button type="submit" class="link strong">Save</button>
+    </div>
+    <div class="photo-row">
+      <button type="button" class="photo-tile" data-asset="photo" aria-label="${a.image ? 'Change photo' : 'Add a photo'}">${assetTile(a.image, a)}</button>
+      <div class="photo-side">
+        ${hint ? `<p class="note">${esc(hint)}</p>` : ''}
+        <div class="photo-actions">${photoButtons(Boolean(a.image), 'data-asset')}</div>
+      </div>
+    </div>
+    <label>Name<input name="name" value="${esc(a.name)}" placeholder="e.g. Dishwasher, Sofa, Laptop" autocomplete="off" enterkeyhint="done"></label>
+    <div class="row2">
+      <label>Room ${selectPicker('room', ['', ...allRooms()], a.room || '', { label: 'Room', text: (v) => v || 'Not set', other: { label: '+ New room…', ask: 'Room name (e.g. Guest room, Attic)' } })}</label>
+      <label>Type<select name="category">${CATEGORIES.map((c) => `<option ${c === category ? 'selected' : ''}>${c}</option>`).join('')}</select></label>
+    </div>
+    <div class="row2 wide-first">
+      <label>Brand<input name="brand" value="${esc(a.brand)}" autocomplete="off" enterkeyhint="done"></label>
+      <label>How many
+        <div class="stepper big"><button type="button" data-step="-1" aria-label="One less">−</button><input name="qty" type="number" inputmode="numeric" min="1" step="1" value="${a.qty || 1}" aria-label="How many"><button type="button" data-step="1" aria-label="One more">+</button></div>
+      </label>
+    </div>
+
+    <p class="form-section">For repairs and claims</p>
+    <label>Model number${codeField('model', a.model, 'model number')}</label>
+    <label>Serial number${codeField('serial', a.serial, 'serial number')}</label>
+    <p class="note">Usually on a label inside the door, on the back or underneath. Scan the barcode next to it, or on iPhone tap the box, then Scan Text, to read it off the label.</p>
+
+    <p class="form-section">Purchase & warranty</p>
+    <div class="row2">
+      <label>Bought on<input name="bought" type="date" value="${esc(a.bought)}" max="${today}"></label>
+      <label>Price paid<input name="price" inputmode="decimal" value="${a.price != null ? a.price : ''}" placeholder="$" autocomplete="off" enterkeyhint="done"></label>
+    </div>
+    <p class="note" id="priceNote"></p>
+    <label>Bought at<input name="store" value="${esc(a.store)}" list="assetStores" autocomplete="off" enterkeyhint="done"></label>
+    <datalist id="assetStores">${stores.map((s) => `<option value="${esc(s)}">`).join('')}</datalist>
+    <label>Warranty until<input name="warranty" type="date" value="${esc(a.warranty)}"></label>
+    <div class="quick-dates">${[1, 2, 3, 5].map((y) => `<button type="button" data-warranty="${y}">${y} year${y === 1 ? '' : 's'}</button>`).join('')}<button type="button" data-warranty="clear">Clear</button></div>
+    <p class="note" id="warrantyNote"></p>
+    <span class="label">Receipt or label</span>
+    <div id="docBox">${docHtml(a.doc)}</div>
+
+    <p class="form-section">Upkeep</p>
+    <div id="careList">${(a.care || []).map(careRow).join('')}</div>
+    <div id="careSuggest">${careSuggestHtml(a.name, (a.care || []).map((c) => c.task))}</div>
+    <button type="button" class="add-row" data-care-add>+ Add a reminder</button>
+
+    <p class="form-section">Notes</p>
+    <label>Manual or support link<input name="link" type="url" inputmode="url" value="${esc(a.link)}" placeholder="https://" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
+    <div class="manual-links">
+      ${a.link ? `<a class="link small" href="${esc(a.link)}" target="_blank" rel="noopener">Open the link ↗</a>` : ''}
+      ${manual ? `<a class="link small" href="https://www.google.com/search?q=${encodeURIComponent(`${manual} manual`)}" target="_blank" rel="noopener">Find the ${esc(manual)} manual ↗</a>` : ''}
+    </div>
+    <label>Notes<textarea name="notes" rows="3" placeholder="Paint colour, who installed it, what the warranty covers…">${esc(a.notes)}</textarea></label>
+    <p class="note error" id="assetError" role="alert"></p>
+    <button class="primary" type="submit">${isNew ? 'Add to the house' : 'Save'}</button>
+    ${isNew ? '' : `<button type="button" class="danger" data-asset="delete">Delete</button>
+      <p class="note" style="text-align:center">Last changed ${ago(a.updated)}${a.by && syncInfo().joined ? ` by ${esc(a.by)}` : ''}</p>`}
+  </form>`;
+}
+
+// The price total and the warranty quick picks explain themselves as the form changes.
+function updateAssetNotes(form) {
+  const qty = Math.max(1, parseInt(form.qty.value, 10) || 1);
+  const price = parsePrice(form.price.value);
+  const note = $('#priceNote', form);
+  note.classList.toggle('error', Number.isNaN(price));
+  note.textContent = Number.isNaN(price) ? 'Numbers only, like 1299.99'
+    : price != null && qty > 1 ? `That’s for each one: ${qty} × ${money(price)} = ${money(price * qty)}` : '';
+  const { value: bought } = form.bought;
+  const { value: warranty } = form.warranty;
+  const bad = warranty && bought && warranty < bought;
+  $('#warrantyNote', form).classList.toggle('error', Boolean(bad));
+  $('#warrantyNote', form).textContent = bad ? 'The warranty ends before it was bought — check both dates.'
+    : bought ? `Quick picks count from when it was bought, ${shortDate(bought, true)}.` : 'Quick picks count from today. Add when it was bought first, if you know.';
+}
+
+function showAssetPhoto(form) {
+  const ed = ui.assetEditor;
+  const image = ed.photo !== undefined ? ed.photo : ed.asset.image;
+  const preview = { ...ed.asset, name: form.name.value, category: form.category.value };
+  $('.photo-tile', form).innerHTML = assetTile(image, preview);
+  $('.photo-row .photo-actions', form).innerHTML = photoButtons(Boolean(image), 'data-asset');
+}
+
+function redrawCareSuggest(form) {
+  const have = [...form.querySelectorAll('.care-task')].map((i) => i.value.trim());
+  $('#careSuggest', form).innerHTML = careSuggestHtml(form.name.value, have);
+}
+
+function addCareRow(form, c, focus = false) {
+  $('#careList', form).insertAdjacentHTML('beforeend', careRow({ id: uid(), from: todayIso(), last: '', ...c }));
+  redrawCareSuggest(form);
+  if (focus) $('#careList .care-row:last-child .care-task', form).focus();
+}
+
+// Read a model or serial number off its barcode; the number read is shown so it can be checked.
+function scanInto(form, field) {
+  const label = field === 'model' ? 'model number' : 'serial number';
+  openScanner({
+    hint: `Point at the barcode by the ${label}`,
+    fill: (text) => {
+      const input = form[field];
+      if (!input || !ui.assetEditor) return;
+      input.value = cleanCode(text);
+      input.classList.remove('just-read');
+      void input.offsetWidth;
+      input.classList.add('just-read');
+      toast(`Read ${label} ${input.value} — check it against the label`);
+    },
+    typeInstead: () => form[field]?.focus(),
+  });
+}
+
+$('#main').addEventListener('click', (e) => {
+  const form = e.target.closest('#assetForm');
+  const ed = ui.assetEditor;
+  if (!form || !ed) return;
+  const step = e.target.closest('[data-step]');
+  if (step) {
+    form.qty.value = Math.max(1, (parseInt(form.qty.value, 10) || 1) + Number(step.dataset.step));
+    updateAssetNotes(form);
+  }
+  const act = e.target.closest('[data-asset]')?.dataset.asset;
+  if (act === 'cancel') return closeAsset();
+  if (act === 'delete') {
+    if (!confirm(`Delete ${ed.asset.name}? Its details and photos go too.`)) return;
+    closeAsset();
+    return deleteAsset(ed.asset);
+  }
+  // New photos are kept aside until Save, so Cancel throws them away.
+  if (act === 'photo' || act === 'doc') {
+    pickPhoto().then(async (file) => {
+      if (!file || ui.assetEditor !== ed) return;
+      try {
+        if (act === 'photo') {
+          ed.photo = await shrinkPhoto(file);
+          showAssetPhoto(form);
+        } else {
+          ed.doc = await shrinkPhoto(file, 1000, true);
+          $('#docBox', form).innerHTML = docHtml(ed.doc);
+        }
+      } catch {
+        toast('Couldn’t read that picture — try another one.');
+      }
+    });
+  }
+  if (act === 'nophoto') {
+    ed.photo = '';
+    showAssetPhoto(form);
+  }
+  if (act === 'nodoc') {
+    ed.doc = '';
+    $('#docBox', form).innerHTML = docHtml('');
+  }
+  if (act === 'doc-view') {
+    const doc = ed.doc !== undefined ? ed.doc : ed.asset.doc;
+    openSheet(`<div class="sheet-head"><h2>Receipt or label</h2><button class="link" data-close>Done</button></div><img class="doc-full" src="${esc(doc)}" alt="Receipt or label">`);
+  }
+  const years = e.target.closest('[data-warranty]')?.dataset.warranty;
+  if (years) {
+    form.warranty.value = years === 'clear' ? '' : addMonths(form.bought.value || todayIso(), 12 * Number(years));
+    updateAssetNotes(form);
+  }
+  const into = e.target.closest('[data-scan-into]')?.dataset.scanInto;
+  if (into) scanInto(form, into);
+  if (e.target.closest('[data-care-add]')) addCareRow(form, { task: '', every: 12 }, true);
+  const tip = e.target.closest('[data-care-suggest]');
+  if (tip) addCareRow(form, { task: tip.dataset.careSuggest, every: Number(tip.dataset.every) });
+  if (e.target.closest('[data-care-today]')) e.target.closest('.care-row').querySelector('.care-last').value = todayIso();
+  if (e.target.closest('[data-care-del]')) {
+    e.target.closest('.care-row').remove();
+    redrawCareSuggest(form);
+  }
+});
+
+$('#main').addEventListener('input', (e) => {
+  const form = e.target.closest('#assetForm');
+  const ed = ui.assetEditor;
+  if (!form || !ed) return;
+  if (e.target.name === 'name') {
+    // The type follows the name until it's picked by hand.
+    const guess = !ed.typePicked && !ed.asset.category && guessCategory(form.name.value);
+    if (guess) form.category.value = guess;
+    if (ed.photo === undefined && !ed.asset.image) showAssetPhoto(form);
+    redrawCareSuggest(form);
+  }
+  if (e.target.classList.contains('care-task')) redrawCareSuggest(form);
+  if (['qty', 'price', 'bought', 'warranty'].includes(e.target.name)) updateAssetNotes(form);
+});
+
+$('#main').addEventListener('change', (e) => {
+  const form = e.target.closest('#assetForm');
+  if (!form || !ui.assetEditor) return;
+  if (e.target.name === 'category') {
+    ui.assetEditor.typePicked = true;
+    if (ui.assetEditor.photo === undefined && !ui.assetEditor.asset.image) showAssetPhoto(form);
+  }
+  if (['bought', 'warranty'].includes(e.target.name)) updateAssetNotes(form);
+});
+
+$('#main').addEventListener('submit', (e) => {
+  if (e.target.id !== 'assetForm' || !ui.assetEditor) return;
+  e.preventDefault();
+  saveAsset(e.target);
+});
+
+// Checks what's easy to get wrong (a price typo, dates the wrong way round, a serial number
+// already on something else) before saving.
+function saveAsset(form) {
+  const { asset, isNew, photo, doc } = ui.assetEditor;
+  const fail = (msg, field) => {
+    $('#assetError', form).textContent = msg;
+    field?.focus();
+    field?.scrollIntoView({ block: 'center' });
+  };
+  const name = form.name.value.trim();
+  if (!name) return fail('Give it a name first.', form.name);
+  const price = parsePrice(form.price.value);
+  if (Number.isNaN(price)) return fail('Price paid: numbers only, like 1299.99.', form.price);
+  const today = todayIso();
+  const bought = form.bought.value;
+  if (bought > today) return fail('“Bought on” is in the future — check the date.', form.bought);
+  const warranty = form.warranty.value;
+  if (warranty && bought && warranty < bought) return fail('The warranty ends before it was bought — check both dates.', form.warranty);
+  let link = form.link.value.trim();
+  if (link && !/^https?:\/\//i.test(link)) link = `https://${link}`;
+  try {
+    if (link) new URL(link);
+  } catch {
+    return fail('That link doesn’t look like a web address.', form.link);
+  }
+  const care = [...form.querySelectorAll('.care-row')]
+    .map((row) => ({ id: row.dataset.careId, task: $('.care-task', row).value.trim(), every: Number($('.care-every', row).value), last: $('.care-last', row).value, from: row.dataset.from }))
+    .filter((c) => c.task);
+  const early = care.find((c) => c.last > today);
+  if (early) return fail(`“${early.task}” was last done in the future — check the date.`, form.querySelector(`[data-care-id="${CSS.escape(early.id)}"] .care-last`));
+  const serial = tidyCode(form.serial.value);
+  const twin = serial && state.assets.find((x) => x.id !== asset.id && x.serial && codeKey(x.serial) === codeKey(serial));
+  if (twin && !confirm(`${twin.name} already has serial number ${twin.serial}. Save it on this one too?`)) return fail('Check the serial number.', form.serial);
+  checkpoint('assets');
+  const room = form.room.value === '__new' ? '' : form.room.value;
+  Object.assign(asset, {
+    name, room, category: form.category.value, brand: form.brand.value.trim(), model: tidyCode(form.model.value), serial,
+    qty: Math.max(1, parseInt(form.qty.value, 10) || 1), bought, price, store: form.store.value.trim(), warranty, link,
+    notes: form.notes.value.trim(), care, updated: Date.now(),
+  });
+  if (photo !== undefined) asset.image = photo;
+  if (doc !== undefined) asset.doc = doc;
+  if (room && !prefs.rooms.includes(room)) {
+    prefs.rooms.push(room);
+    savePrefs();
+  }
+  if (isNew) state.assets.push(asset);
+  // Someone else's change may have replaced this record while the page was open; this save wins.
+  else if (assetById(asset.id) !== asset) state.assets = assetById(asset.id) ? state.assets.map((x) => (x.id === asset.id ? asset : x)) : [...state.assets, asset];
+  save();
+  closeAsset();
+  toast(isNew ? `Added ${asset.name}` : 'Saved', { undo: true });
+}
+
+// ---------- House: rooms and sharing ----------
+
+function openRooms() {
+  const rooms = allRooms();
+  const count = (r) => state.assets.filter((a) => a.room === r).length;
+  openSheet(`
+    <div class="sheet-head"><h2>Rooms</h2><button class="link" data-close>Done</button></div>
+    <p class="note">Rooms group things on the House tab. Tap one to rename it; use the arrows to change the order.</p>
+    <ul class="list" style="margin-top:12px">${rooms
+      .map((r, i) => `<li class="item place-row">
+        <button class="info" data-room-rename="${esc(r)}"><div class="name">${esc(r)}</div><div class="meta">${count(r)} thing${count(r) === 1 ? '' : 's'}</div></button>
+        <button class="icon-btn" data-room-move="-1" data-room-name="${esc(r)}" ${i === 0 ? 'disabled' : ''} aria-label="Move ${esc(r)} up">↑</button>
+        <button class="icon-btn" data-room-move="1" data-room-name="${esc(r)}" ${i === rooms.length - 1 ? 'disabled' : ''} aria-label="Move ${esc(r)} down">↓</button>
+        <button class="remove" data-room-del="${esc(r)}" aria-label="Remove ${esc(r)}"><svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17"/></svg></button>
+      </li>`)
+      .join('')}</ul>
+    <button class="add-row" data-room-add>+ Add a room</button>`);
+}
+
+function roomAction(e) {
+  const t = (k) => e.target.closest(`[${k}]`);
+  if (t('data-room-add')) {
+    const name = sentenceCase(prompt('Name the room (e.g. Guest room, Attic)')?.trim() || '');
+    if (name && !allRooms().includes(name)) prefs.rooms = [...allRooms(), name];
+  }
+  const rename = t('data-room-rename')?.dataset.roomRename;
+  if (rename) {
+    const to = sentenceCase(prompt(`Rename “${rename}” to:`, rename)?.trim() || '');
+    if (!to || to === rename) return;
+    if (allRooms().includes(to) && !confirm(`${to} already exists. Put everything from ${rename} there?`)) return;
+    checkpoint('assets');
+    for (const a of state.assets) {
+      if (a.room !== rename) continue;
+      a.room = to;
+      a.updated = Date.now();
+    }
+    prefs.rooms = [...new Set(allRooms().map((r) => (r === rename ? to : r)))];
+    prefs.foldedRooms = prefs.foldedRooms.map((r) => (r === rename ? to : r));
+    if (ui.room === rename) ui.room = to;
+  }
+  const move = t('data-room-move');
+  if (move) {
+    const rooms = allRooms();
+    const i = rooms.indexOf(move.dataset.roomName);
+    const j = i + Number(move.dataset.roomMove);
+    [rooms[i], rooms[j]] = [rooms[j], rooms[i]];
+    prefs.rooms = rooms;
+  }
+  const del = t('data-room-del')?.dataset.roomDel;
+  if (del) {
+    const n = state.assets.filter((a) => a.room === del).length;
+    if (n && !confirm(`Remove ${del}? Its ${n} thing${n === 1 ? '' : 's'} stay on the House tab under “No room set”.`)) return;
+    checkpoint('assets');
+    for (const a of state.assets) {
+      if (a.room !== del) continue;
+      a.room = '';
+      a.updated = Date.now();
+    }
+    prefs.rooms = prefs.rooms.filter((r) => r !== del);
+  }
+  savePrefs();
+  save();
+  openRooms();
+}
+
+function openHouseExport() {
+  openSheet(`
+    <div class="sheet-head"><h2>Share the house inventory</h2><button class="link" data-close>Done</button></div>
+    <p class="note">For an insurer, a move or your own records: every room with makes, model and serial numbers, purchase dates,
+      prices and warranties. Photos stay in the app; to keep everything, use Back up to a file in the ⋯ menu.</p>
+    <div class="row-actions"><button class="btn" data-house-export="text">As text</button><button class="btn primary" data-house-export="csv">As a spreadsheet</button></div>`);
+}
+
+async function exportHouse(kind) {
+  const order = [...allRooms(), ''];
+  const rows = [...state.assets].sort((a, b) => order.indexOf(a.room || '') - order.indexOf(b.room || '') || a.name.localeCompare(b.name));
+  const today = todayIso();
+  if (kind === 'csv') {
+    const cols = [
+      ['Name', 'name'], ['Room', 'room'], ['Type', 'category'], ['Brand', 'brand'], ['Model', 'model'], ['Serial number', 'serial'],
+      ['Quantity', 'qty'], ['Bought on', 'bought'], ['Price each', (a) => (a.price != null ? a.price.toFixed(2) : '')],
+      ['Total value', (a) => (a.price != null ? assetValue(a).toFixed(2) : '')], ['Bought at', 'store'], ['Warranty until', 'warranty'],
+      ['Manual', 'link'], ['Notes', 'notes'],
+    ];
+    const cell = (v) => {
+      const s = String(v ?? '');
+      return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const csv = [cols.map(([h]) => h), ...rows.map((a) => cols.map(([, k]) => (typeof k === 'function' ? k(a) : a[k])))]
+      .map((r) => r.map(cell).join(','))
+      .join('\r\n');
+    const file = new File([csv], `house-inventory-${today}.csv`, { type: 'text/csv' });
+    if (navigator.canShare?.({ files: [file] })) {
+      try {
+        return await navigator.share({ files: [file], title: 'House inventory' });
+      } catch (err) {
+        if (err.name === 'AbortError') return;
+      }
+    }
+    const link = Object.assign(document.createElement('a'), { href: URL.createObjectURL(file), download: file.name });
+    link.click();
+    return setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+  }
+  const total = rows.reduce((s, a) => s + assetValue(a), 0);
+  const lines = [`House inventory · ${shortDate(today, true)}`, `${rows.length} thing${rows.length === 1 ? '' : 's'}${total ? ` · ${money(total)} recorded` : ''}`];
+  let room = null;
+  for (const a of rows) {
+    if ((a.room || '') !== room) {
+      room = a.room || '';
+      lines.push('', (room || 'No room set').toUpperCase());
+    }
+    const bits = [
+      a.qty > 1 ? `×${a.qty}` : '', [a.brand, a.model].filter(Boolean).join(' '), a.serial ? `S/N ${a.serial}` : '',
+      a.bought ? `bought ${shortDate(a.bought, true)}` : '', a.price != null ? `${money(a.price)}${a.qty > 1 ? ' each' : ''}` : '',
+      a.warranty ? `warranty to ${shortDate(a.warranty, true)}` : '',
+    ].filter(Boolean);
+    lines.push(`• ${a.name}${bits.length ? ` — ${bits.join(' · ')}` : ''}`);
+  }
+  shareText(lines.join('\n'), 'House inventory');
 }
 
 // ---------- Wiring ----------
@@ -2730,12 +3598,14 @@ $('#main').addEventListener('click', (e) => {
     savePrefs();
     return render();
   }
+  if (houseClick(e)) return;
   const btn = e.target.closest('[data-act]');
   if (!btn || Date.now() - lastSwipeAt < 400) return;
   const item = byId(btn.closest('[data-id]')?.dataset.id);
   switch (btn.dataset.act) {
     case 'inc': return bump(item, 1, btn.dataset.place || null);
     case 'dec': return bump(item, -1, btn.dataset.place || null);
+    case 'count': return setCount(item, btn.dataset.place || null);
     case 'paste': return openPaste();
     case 'pick': {
       const from = btn.closest('[data-place]').dataset.place || null;
@@ -3047,14 +3917,16 @@ $('#main').addEventListener('submit', (e) => {
 });
 
 $('#chips').addEventListener('click', (e) => {
-  const chip = e.target.closest('[data-loc]');
+  const chip = e.target.closest('[data-loc], [data-room]');
   if (!chip) return;
-  ui.loc = chip.dataset.loc;
+  if (chip.dataset.room !== undefined) ui.room = chip.dataset.room;
+  else ui.loc = chip.dataset.loc;
   render();
 });
 
 $('#search').addEventListener('input', (e) => {
-  ui.q = e.target.value;
+  if (ui.view === 'house') ui.hq = e.target.value;
+  else ui.q = e.target.value;
   render();
 });
 
@@ -3067,7 +3939,8 @@ document.querySelectorAll('.tab').forEach((t) =>
   }),
 );
 
-$('#scanBtn').addEventListener('click', openScanner);
+// On the House tab, Scan adds to the house instead of counting stock.
+$('#scanBtn').addEventListener('click', () => openScanner(ui.view === 'house' ? HOUSE_SCAN : null));
 $('#speakBtn').addEventListener('click', openVoice);
 $('#menuBtn').addEventListener('click', openMenu);
 $('#backdrop').addEventListener('click', closeSheet);
@@ -3109,6 +3982,9 @@ $('#sheet').addEventListener('click', (e) => {
   if (e.target.closest('[data-place-back]')) return openPlaces();
   if (e.target.closest('[data-sub-add], [data-sub-rename], [data-sub-move], [data-sub-del]')) return spotAction(e);
   if (e.target.closest('[data-place-add], [data-place-rename], [data-place-move], [data-place-del]')) return placeAction(e);
+  if (e.target.closest('[data-room-add], [data-room-rename], [data-room-move], [data-room-del]')) return roomAction(e);
+  const houseExport = e.target.closest('[data-house-export]')?.dataset.houseExport;
+  if (houseExport) return exportHouse(houseExport);
   if (e.target.closest('[data-store-add]')) {
     const name = titleCase(prompt('Store name (e.g. Costco, Aldi)') || '');
     if (name && !allStores().includes(name)) {
@@ -3142,15 +4018,17 @@ $('#sheet').addEventListener('click', (e) => {
   if (m === 'add') openEditor(newItem({ qty: 1 }), { isNew: true });
   if (m === 'stores') openStores();
   if (m === 'places') openPlaces();
+  if (m === 'rooms') openRooms();
   if (m === 'paste') openPaste();
   if (m === 'household') openHousehold();
   if (m === 'siri') openSiriSetup();
   if (m === 'export') exportBackup();
   if (m === 'import') $('#importFile').click();
   if (m === 'sample') loadSample();
-  if (m === 'erase' && confirm('Erase every item? (You can undo right after.)')) {
-    checkpoint();
+  if (m === 'erase' && confirm(`Erase every item${state.assets.length ? ' and everything on the House tab' : ''}? (You can undo right after.)`)) {
+    checkpoint('all');
     state.items = [];
+    state.assets = [];
     save();
     toast('Everything erased', { undo: true });
   }
@@ -3193,6 +4071,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   if (!$('#sheet').hidden) closeSheet();
   else if (ui.editor) closeEditor(null);
+  else if (ui.assetEditor) closeAsset();
   else if (!$('#scanner').hidden) closeScanner();
 });
 
@@ -3222,20 +4101,23 @@ window.homestockReady = true;
 // Join up with the household (if this phone is in one), then run anything Siri passed in.
 Promise.race([
   initSync({
-    items: () => state.items,
-    setItems: (items) => {
-      state.items = items;
+    // Belongings travel with the items, marked kind 'asset', and are sorted back out on arrival.
+    items: () => [...state.items, ...state.assets],
+    setItems: (all) => {
+      state.items = all.filter((i) => !isAsset(i));
+      state.assets = all.filter(isAsset);
       persistOnly();
     },
-    settings: () => ({ stores: prefs.stores, places: prefs.places, subPlaces: prefs.subPlaces }),
+    settings: () => ({ stores: prefs.stores, places: prefs.places, subPlaces: prefs.subPlaces, rooms: prefs.rooms }),
     applySettings: (data) => {
       if (Array.isArray(data.stores)) prefs.stores = data.stores;
       if (Array.isArray(data.places)) prefs.places = data.places;
       if (data.subPlaces && typeof data.subPlaces === 'object') prefs.subPlaces = data.subPlaces;
+      if (Array.isArray(data.rooms)) prefs.rooms = data.rooms;
       try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch {}
     },
     persist: persistOnly,
-    onRemote: () => !ui.editor && !ui.paste && !ui.account && !drag?.active && !swipe?.active && render(),
+    onRemote: () => !ui.editor && !ui.assetEditor && !ui.paste && !ui.account && !drag?.active && !swipe?.active && render(),
     onStatus: () => {},
   }).catch(() => {}),
   new Promise((r) => setTimeout(r, 5000)),

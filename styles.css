@@ -584,3 +584,48 @@ body { font-variant-numeric: lining-nums; }
 .sub-head .fold { min-height: 32px; margin: 0; }
 .sub-head:first-child { border-top: 0; }
 .sub-head + .swipe-row { border-top: 0; }
+
+/* Tab bar: six across, with Scan and Speak in the middle */
+.tabbar { grid-template-columns: repeat(6, 1fr); padding: 6px 4px env(safe-area-inset-bottom); }
+.tab span, .action span { letter-spacing: .06em; }
+@media (max-width: 360px) { .tab, .action { font-size: 11px; } .tab span, .action span { letter-spacing: 0; } }
+
+/* Counts can be tapped to type the exact number */
+.qty[data-act] { cursor: pointer; border-radius: 8px; padding: 2px 0; }
+.qty[data-act]:active { background: var(--accent-soft); }
+
+/* House tab */
+.house-sum { display: flex; align-items: center; gap: 12px; margin-top: 12px; padding: 12px 14px; }
+.house-sum > div { flex: 1; min-width: 0; }
+.house-sum b { font-family: var(--serif); font-size: 21px; font-weight: 600; }
+.house-sum p { margin: 0; font-size: 13px; }
+.asset-row { cursor: pointer; }
+.asset-row:active { background: var(--accent-soft); }
+.asset-row .value { flex: none; padding-right: 6px; font-family: var(--serif); font-size: 18px; font-weight: 600; font-variant-numeric: lining-nums tabular-nums; }
+.att-row .btn.small { flex: none; }
+.form-section { margin: 28px 0 -6px; font: 500 11px var(--caps); letter-spacing: .16em; text-transform: uppercase; color: var(--gold); }
+.code-field { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+.form .code-field input { margin-top: 0; flex: 1; min-width: 0; }
+.form input.code { font-family: ui-monospace, "SF Mono", Menlo, monospace; letter-spacing: .04em; }
+.form input.just-read { animation: flash 1.4s ease-out; }
+.scan-mini { flex: none; width: 46px; height: 46px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); color: var(--gold); display: grid; place-items: center; }
+.scan-mini svg { width: 22px; height: 22px; }
+.care-row { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px 10px; align-items: end; margin-top: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; }
+.form .care-row .care-task { grid-column: 1 / 3; margin-top: 0; }
+.form .care-row label { margin-top: 0; }
+.care-row .remove { margin: -4px -6px 0 0; }
+.care-row [data-care-today] { min-height: 46px; padding: 0 4px; }
+.care-suggest { margin-top: 10px; }
+.care-suggest button { border-color: var(--gold); color: var(--gold); text-align: left; }
+.doc-row { display: flex; align-items: center; gap: 14px; margin-top: 8px; }
+.doc-tile { flex: none; width: 84px; height: 84px; border-radius: 12px; border: 1px solid var(--line); padding: 0; overflow: hidden; background: var(--card); }
+.doc-tile img { width: 100%; height: 100%; object-fit: cover; }
+.add-row.doc-add { margin: 8px 0 0; padding: 12px; }
+.doc-full { display: block; width: 100%; border-radius: 12px; margin-top: 8px; }
+.manual-links { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 2px; }
+.manual-links:empty { display: none; }
+.manual-links .link.small { padding: 8px 0 0; text-decoration: none; }
+#assetError:empty { min-height: 0; }
+
+/* Scanning for the House tab, or into one field: no Add / Use / Check */
+.scanner.task .seg { visibility: hidden; }
