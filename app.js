@@ -1,11 +1,11 @@
 import {
   parseCommand, resolveActions, matchItem, matchExact, guessLocation, guessEmoji, parsePack, parseListLines,
   suggestShelfLife, openLife, isoDate, DEFAULT_LOCATIONS,
-} from './parser.js?v=34';
+} from './parser.js?v=35';
 import {
   initSync, pushSoon, syncInfo, createHousehold, joinHousehold, leaveHousehold, authenticate, useHousehold, signOut,
   removeMember, newJoinCode, renameMe,
-} from './sync.js?v=34';
+} from './sync.js?v=35';
 
 const APP_VERSION = new URL(import.meta.url).searchParams.get('v') || 'dev';
 const STORAGE_KEY = 'homestock.v1';
@@ -245,9 +245,11 @@ function parseWhere(text) {
   const known = [...allLocations()].sort((a, b) => b.length - a.length)
     .find((pl) => lower === pl.toLowerCase() || lower.startsWith(pl.toLowerCase() + ' ') || lower.startsWith(pl.toLowerCase() + ','));
   const [place, spot = ''] = known ? [known, t.slice(known.length)] : t.split(/\s*[,·]\s*/);
-  // "bin a" → "Bin A", like the spots voice understands.
-  return { place: known || sentenceCase(place), spot: sentenceCase(spot.replace(/^[\s,·:-]+/, '')).replace(/ ([a-z])$/, (m, c) => ` ${c.toUpperCase()}`) };
+  return { place: known || sentenceCase(place), spot: tidySpot(spot) };
 }
+
+// "bin a" → "Bin A", like the spots voice understands.
+const tidySpot = (s) => sentenceCase(s.replace(/^[\s,·:-]+/, '')).replace(/ ([a-z])$/, (m, c) => ` ${c.toUpperCase()}`);
 
 // Move picked rows ({id, from}) to a place and spot, asking for a name when it's a new one.
 function moveTo(picks, place, spot = '') {
@@ -1188,15 +1190,18 @@ function selectPicker(field, options, current, { label, other, text = (v) => v }
 const storePicker = (current) =>
   selectPicker('store', ['', ...allStores()], current, { label: 'Buy at', text: (v) => v || 'Any store', other: { label: '+ New store…', ask: 'Store name (e.g. Costco, Aldi)' } });
 
-// Where it's kept, in one dropdown: each place followed by its spots ("Garage · Shelf 2").
-// The choice lands in the hidden location and shelf fields the rest of the page reads.
-function wherePicker(place, spot) {
-  const opts = allLocations().flatMap((pl) => [[pl, ''], ...spotsIn(pl).map((sp) => [pl, sp])]);
-  if (!opts.some(([p, s]) => p === place && s === spot)) opts.push([place, spot]);
-  return `<select name="where" aria-label="Kept in">${opts
-    .map(([p, s]) => `<option value="${esc(p)}\t${esc(s)}" ${p === place && s === spot ? 'selected' : ''}>${esc(s ? `${p} · ${s}` : p)}</option>`)
-    .join('')}<option value="__new">+ New place or spot…</option></select>
-    <input type="hidden" name="location" value="${esc(place)}"><input type="hidden" name="shelf" value="${esc(spot)}">`;
+// Where it's kept, as two dropdowns: the place, then a spot in it. The spot list only offers
+// that place's spots, so neither list gets long.
+function wherePickers(place, spot) {
+  const places = allLocations().includes(place) ? allLocations() : [...allLocations(), place];
+  const spots = ['', ...spotsIn(place)];
+  if (!spots.includes(spot)) spots.push(spot);
+  return `<label>Kept in <select name="location" aria-label="Kept in" data-prev="${esc(place)}">${places
+    .map((p) => `<option value="${esc(p)}" ${p === place ? 'selected' : ''}>${esc(p)}</option>`)
+    .join('')}<option value="__new">+ New place…</option></select></label>
+    <label>Spot <select name="shelf" aria-label="Spot in ${esc(place)}" data-prev="${esc(spot)}">${spots
+    .map((s) => `<option value="${esc(s)}" ${s === spot ? 'selected' : ''}>${esc(s || 'No spot')}</option>`)
+    .join('')}<option value="__new">+ New spot…</option></select></label>`;
 }
 
 const unitPicker = (current) =>
@@ -1348,11 +1353,9 @@ function renderEditor() {
       </label>
       <label>Counted in ${unitPicker(item.unit)}</label>
     </div>
-    <div class="row2 wide-first">
-      <label>Kept in <span id="wherePick">${wherePicker(item.location, item.shelf || '')}</span></label>
-      <label>Buy at ${storePicker(item.store || '')}</label>
-    </div>
+    <div class="row2" id="wherePick">${wherePickers(item.location, item.shelf || '')}</div>
     <div id="spots">${spotsHtml(item.location)}</div>
+    <label>Buy at ${storePicker(item.store || '')}</label>
     <div class="row2">
       <label>Opened
         <select name="opened">
@@ -1447,17 +1450,26 @@ $('#main').addEventListener('change', (e) => {
     ui.editor.spots[e.target.value] = 1;
     redrawSpots(form);
   }
-  if (e.target.name === 'where') {
-    let [pl, sp = ''] = e.target.value.split('\t');
-    if (e.target.value === '__new') {
-      const typed = prompt('A new place, or a spot in one (e.g. Basement, or Garage shelf 4)')?.trim();
-      ({ place: pl, spot: sp } = typed ? parseWhere(typed) : { place: form.location.value, spot: form.shelf.value });
-      if (sp) addSpot(pl, sp);
-      $('#wherePick', form).innerHTML = wherePicker(pl, sp);
+  if (e.target.name === 'location' || e.target.name === 'shelf') {
+    const sel = e.target;
+    const was = form.location.dataset.prev;
+    let pl = form.location.value;
+    // A different place starts with no spot; going back to where it was brings its spot back.
+    let sp = sel.name === 'shelf' ? sel.value : pl === ui.editor.item.location ? ui.editor.item.shelf || '' : '';
+    if (sel.value === '__new') {
+      const typed = prompt(sel.name === 'location' ? 'New place (e.g. Basement, Hall closet)' : `New spot in the ${was.toLowerCase()} (e.g. Shelf 2, Top drawer, Bin A)`)?.trim();
+      if (sel.name === 'location') ({ place: pl, spot: sp } = typed ? parseWhere(typed) : { place: '', spot: '' });
+      else [pl, sp] = [was, tidySpot(typed || '')];
+      if (!pl || (sel.name === 'shelf' && !sp)) {
+        sel.value = sel.dataset.prev; // cancelled
+        return;
+      }
+      // Typing a spot you already have picks that one.
+      sp = spotsIn(pl).find((s) => s.toLowerCase() === sp.toLowerCase()) || sp;
+      addSpot(pl, sp);
     }
-    const moved = pl !== form.location.value;
-    form.location.value = pl;
-    form.shelf.value = sp;
+    $('#wherePick', form).innerHTML = wherePickers(pl, sp);
+    const moved = pl !== was;
     // Making another place the main one folds its count into the main count.
     if (moved) {
       syncSpots(form);
