@@ -29,7 +29,7 @@ No build step. Plain HTML/CSS/JS modules, installable to the home screen and usa
 
 ```bash
 npm start        # serves on http://localhost:5190
-npm test         # parser, merge and multi-phone sync tests
+npm test         # parser, merge, dinner plan and multi-phone sync tests
 npm run release  # bump the file versions — run before pushing any change
 ```
 
@@ -41,6 +41,7 @@ Camera and microphone need HTTPS, so phones use the live GitHub Pages site. Publ
 
 - `parser.js` — turns sentences into actions and matches names to items (pure, tested)
 - `merge.js` — combines two people's changes to the same thing (pure, tested)
+- `dinners.js` — the Recipes tab's dinner plan: recipes, and picking the week's dinners from what's in stock (pure, tested)
 - `sync.js` — household sharing: sends changes only over the copy it last saw, merging when someone got there first (tested against a stand-in database in `test/sync.test.js`)
 - `app.js` — UI, camera scanning, voice, shopping list
 - `scan-worker.js` — barcode decoding off the main thread (ZXing, upright + rotated)

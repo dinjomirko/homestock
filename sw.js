@@ -1,9 +1,9 @@
 // Network first so updates show up right away; falls back to the cache when offline.
 // Product lookups are never cached.
-const VERSION = 40;
+const VERSION = 41;
 const CACHE = `homestock-v${VERSION}`;
 const SHELL = [
-  './', 'index.html', `styles.css?v=${VERSION}`, `app.js?v=${VERSION}`, `parser.js?v=${VERSION}`, `sync.js?v=${VERSION}`, `merge.js?v=${VERSION}`, `config.js?v=${VERSION}`, 'scan-worker.js',
+  './', 'index.html', `styles.css?v=${VERSION}`, `app.js?v=${VERSION}`, `parser.js?v=${VERSION}`, `sync.js?v=${VERSION}`, `merge.js?v=${VERSION}`, `dinners.js?v=${VERSION}`, `config.js?v=${VERSION}`, 'scan-worker.js',
   'manifest.webmanifest', 'icon.svg', 'apple-touch-icon.png',
 ];
 

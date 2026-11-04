@@ -599,6 +599,47 @@ body { font-variant-numeric: lining-nums; }
 }
 .cook-bar span { flex: 1; font-weight: 600; }
 .cook-bar .btn { min-height: 44px; }
+.cook-modes { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-top: 10px; padding: 4px; border-radius: 12px; background: var(--accent-soft); }
+.cook-modes button {
+  border: 0; background: none; min-height: 40px; border-radius: 9px; color: var(--muted);
+  font: 500 12px var(--caps); letter-spacing: .14em; text-transform: uppercase;
+}
+.cook-modes button.on { background: var(--card); color: var(--ink); box-shadow: 0 1px 4px rgba(42, 30, 18, .14); }
+
+/* Dinner plan */
+.dinner-head { margin-top: 12px; }
+.dinner-head p { margin-bottom: 4px; }
+.dinner-head .chips { flex-wrap: wrap; }
+.dinner-sum {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+  margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); font-size: 14px;
+}
+.dinner-sum .note { margin: 0; }
+.dinner-list { margin-top: 14px; }
+.dinner { border-top: 1px solid var(--line); }
+.dinner:first-child { border-top: 0; }
+.dinner-top { display: flex; align-items: center; gap: 8px; padding: 8px 10px 8px 12px; min-height: 64px; }
+.dinner-open { all: unset; box-sizing: border-box; flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.dinner-open:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; border-radius: 10px; }
+.dinner-open .info { display: flex; flex-direction: column; }
+.dinner .meta { white-space: normal; }
+.dinner-day { flex: none; width: 44px; height: 48px; border-radius: 10px; background: var(--bg); display: grid; place-content: center; text-align: center; }
+.dinner-day small { font: 500 10px var(--caps); letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+.dinner-day b { font-family: var(--serif); font-size: 21px; font-weight: 600; line-height: 1; }
+.dinner.tonight .dinner-day { background: var(--accent); }
+.dinner.tonight .dinner-day small, .dinner.tonight .dinner-day b { color: var(--accent-ink); }
+.dinner-body { padding: 0 14px 16px 68px; }
+.dinner-body h4 { font: 500 11px var(--caps); letter-spacing: .16em; text-transform: uppercase; color: var(--gold); margin: 10px 0 6px; }
+.dinner-ing { list-style: none; margin: 0; padding: 0; }
+.dinner-ing li { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; padding: 3px 0; }
+.dinner-ing small { flex: none; font-size: 12px; font-weight: 600; color: var(--warn); }
+.dinner-ing li.have small { font-weight: 500; color: var(--muted); }
+.dinner-body ol { margin: 0; padding-left: 18px; }
+.dinner-body ol li + li { margin-top: 4px; }
+.dinner-tip { margin: 12px 0 0; padding: 10px 12px; border-radius: 10px; background: var(--warn-soft); }
+.dinner-tip b { display: block; margin-bottom: 2px; font: 500 11px var(--caps); letter-spacing: .16em; text-transform: uppercase; color: var(--warn); }
+.dinner-new { display: block; margin: 12px 4px 0; }
+@media (max-width: 400px) { .dinner-body { padding-left: 14px; } }
 
 /* Spot headings inside a place on the Stock tab */
 .sub-head {

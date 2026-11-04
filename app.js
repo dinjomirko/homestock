@@ -1,12 +1,15 @@
 import {
   parseCommand, resolveActions, matchItem, matchExact, guessLocation, guessEmoji, parsePack, parseListLines,
   suggestShelfLife, openLife, isoDate, DEFAULT_LOCATIONS,
-} from './parser.js?v=40';
+} from './parser.js?v=41';
 import {
   initSync, pushSoon, syncInfo, createHousehold, joinHousehold, leaveHousehold, authenticate, useHousehold, signOut,
   removeMember, newJoinCode, renameMe,
-} from './sync.js?v=40';
-import { mergeItem, slim } from './merge.js?v=40';
+} from './sync.js?v=41';
+import { mergeItem, slim } from './merge.js?v=41';
+import {
+  dinnerById, matches as dinnerMatches, shopName, seeded, dinnerPool, allocate, extendPlan, swapDinner, goingOff, PLAN_DAYS,
+} from './dinners.js?v=41';
 
 const APP_VERSION = new URL(import.meta.url).searchParams.get('v') || 'dev';
 const STORAGE_KEY = 'homestock.v1';
@@ -51,9 +54,11 @@ delete prefs.shopStore; // the store filter used to be remembered between launch
 // select: while picking several Stock items to move together, a Map of picked rows.
 // hq, room: search and room filter on the House tab. assetEditor: the belonging being edited.
 // cq: the ingredient search on the Recipes tab.
+// dinnerOpen: which of the planned dinners show their recipe. dinnerSeen: per date, the dinners
+// Swap has already offered there.
 const ui = {
   view: 'stock', loc: 'All', q: '', bought: new Map(), flash: null, editor: null, paste: null, account: null, shopStore: 'all', select: null,
-  hq: '', room: 'All', assetEditor: null, cq: '',
+  hq: '', room: 'All', assetEditor: null, cq: '', dinnerOpen: new Set(), dinnerSeen: new Map(),
 };
 const undoStack = [];
 
@@ -776,7 +781,8 @@ function renderShop() {
 }
 
 // ---------- Recipes ----------
-// Pick the ingredients to cook with and get a ready-made question for Claude or any recipe app.
+// Two halves: the dinner plan (the week's dinners from what's in stock), and recipe ideas (pick
+// the ingredients to cook with and get a ready-made question for Claude or any recipe app).
 
 const MEALS = ['Any meal', 'Breakfast', 'Lunch', 'Dinner', 'Side dish', 'Snack', 'Dessert'];
 // How each meal reads in the question: "ideas for dinner", "ideas for a side dish".
@@ -787,10 +793,150 @@ const byUseBy = (a, b) => (daysLeft(a) ?? 999) - (daysLeft(b) ?? 999) || a.name.
 // Filled in place (not copied), so a change made through it sticks.
 function cookPrefs() {
   const c = (prefs.cook ??= {});
-  const defaults = { picked: [], meal: 'Any meal', cuisine: 'Any cuisine', servings: 2, extras: true, notes: '', others: false };
+  const defaults = {
+    picked: [], meal: 'Any meal', cuisine: 'Any cuisine', servings: 2, extras: true, notes: '', others: false, mode: 'dinners',
+    dinners: { start: '', ids: [], seed: 1, max: 30, veg: false },
+  };
   for (const [k, v] of Object.entries(defaults)) c[k] ??= v;
   return c;
 }
+
+const cookModes = (c) => {
+  const tab = (mode, label) => `<button role="tab" class="${c.mode === mode ? 'on' : ''}" aria-selected="${c.mode === mode}" data-cook-mode="${mode}">${label}</button>`;
+  return `<div class="cook-modes" role="tablist" aria-label="Recipes">${tab('dinners', 'Dinner plan')}${tab('ideas', 'Recipe ideas')}</div>`;
+};
+
+// ---------- Dinner plan ----------
+// The next seven dinners for two adults and two toddlers, using what's in stock first (dinners.js
+// does the choosing). It rolls on by itself: each new day drops the dinners that have passed and
+// plans one more at the end, so tonight is always first and the week ahead is always planned.
+
+const dinnerStock = () => state.items.filter((i) => i.qty > 0 && !NOT_FOOD.test(i.name)).map((i) => ({ id: i.id, name: i.name, qty: i.qty, days: daysLeft(i) }));
+const daysBetween = (a, b) => Math.round((new Date(b + 'T00:00') - new Date(a + 'T00:00')) / 864e5);
+const onTheList = (key) => state.items.some((i) => isLow(i) && dinnerMatches(i.name, key));
+// What the plan still needs to buy, as recipe keys, leaving out what's already on the list.
+const dinnerNeeds = (plan) => [...new Set(plan.flat().filter((x) => !x.item).map((x) => x.key))].filter((k) => !onTheList(k));
+
+function dinnerPlan(stock) {
+  const d = cookPrefs().dinners;
+  const today = todayIso();
+  const shift = d.start ? daysBetween(d.start, today) : PLAN_DAYS;
+  const pool = dinnerPool(d);
+  let keep = shift >= 0 && shift < PLAN_DAYS ? d.ids.slice(shift) : [];
+  if (!keep.every((id) => pool.includes(id))) keep = [];
+  if (shift || keep.length < PLAN_DAYS) {
+    const ids = extendPlan(keep, stock, d, seeded(d.seed + daysBetween('2000-01-01', today)));
+    if (shift || String(ids) !== String(d.ids)) {
+      Object.assign(d, { start: today, ids });
+      ui.dinnerOpen.clear();
+      writePrefs();
+    }
+  }
+  return d.ids;
+}
+
+function renderDinners() {
+  const d = cookPrefs().dinners;
+  const stock = dinnerStock();
+  const ids = dinnerPlan(stock);
+  const plan = allocate(ids, stock);
+  const rows = plan.flat();
+  const needs = dinnerNeeds(plan);
+  const anyMissing = rows.some((x) => !x.item);
+  const chip = (on, attr, label) => `<button class="chip ${on ? 'on' : ''}" ${attr} aria-pressed="${on}">${label}</button>`;
+  let html = `<div class="card dinner-head">
+      <h3>Next ${ids.length} dinners</h3>
+      <p>Quick, healthy dinners for 2 adults and 2 toddlers, made from what you have first.</p>
+      <div class="chips">${chip(d.max === 20, 'data-dinner-max="20"', 'Up to 20 min')}${chip(d.max === 30, 'data-dinner-max="30"', 'Up to 30 min')}${chip(d.veg, 'data-dinner="veg"', 'Meatless')}</div>
+      <div class="dinner-sum">
+        <span><b>${rows.filter((x) => x.item).length} of ${rows.length}</b> ingredients in stock</span>
+        ${needs.length ? `<button class="btn small primary" data-dinner="list">Add ${needs.length} to the list</button>` : anyMissing ? '<span class="note">The rest is on the shopping list</span>' : ''}
+      </div>
+    </div>
+    <ul class="list dinner-list">`;
+  plan.forEach((ing, i) => {
+    const r = dinnerById[ids[i]];
+    const day = new Date(dateIn(i) + 'T00:00');
+    const open = ui.dinnerOpen.has(i);
+    const soon = [...new Set(ing.filter((x) => goingOff(x.item, i) != null).map((x) => x.item.name.toLowerCase()))];
+    const when = i === 0 ? 'Tonight' : i === 1 ? 'Tomorrow' : day.toLocaleDateString(undefined, { weekday: 'long' });
+    html += `<li class="dinner ${i === 0 ? 'tonight' : ''}">
+      <div class="dinner-top">
+        <button class="dinner-open" data-dinner-open="${i}" aria-expanded="${open}">
+          <span class="dinner-day"><small>${day.toLocaleDateString(undefined, { weekday: 'short' })}</small><b>${day.getDate()}</b></span>
+          <span class="info"><span class="name">${esc(r.name)}</span>
+            <span class="meta">${i === 0 ? 'Tonight · ' : ''}${r.min} min · ${ing.filter((x) => x.item).length} of ${ing.length} in stock${soon.map((n) => ` · <span class="warn">Uses up ${esc(n)}</span>`).join('')}</span></span>
+        </button>
+        <button class="btn small" data-dinner-swap="${i}" aria-label="Swap ${esc(when.toLowerCase())}’s dinner">Swap</button>
+      </div>
+      ${open ? `<div class="dinner-body">
+        <h4>Ingredients</h4>
+        <ul class="dinner-ing">${ing.map((x) => `<li class="${x.item ? 'have' : ''}"><span>${esc(x.label)}</span><small>${x.item ? 'In stock' : x.stale ? (i ? 'Past its date by then' : 'Yours is past its date') : onTheList(x.key) ? 'On the list' : 'To buy'}</small></li>`).join('')}</ul>
+        <h4>Steps</h4>
+        <ol>${r.steps.map((s) => `<li>${esc(s)}</li>`).join('')}</ol>
+        <p class="dinner-tip"><b>For the toddlers</b>${esc(r.tod)}</p>
+      </div>` : ''}
+    </li>`;
+  });
+  return `${html}</ul><button class="link small dinner-new" data-dinner="new">Plan different dinners</button>`;
+}
+
+// Puts what the plan still needs on the shopping list: something you've run out of goes back on
+// it, anything new goes on as list-only.
+function listDinnerNeeds() {
+  const stock = dinnerStock();
+  const needs = dinnerNeeds(allocate(cookPrefs().dinners.ids, stock));
+  if (!needs.length) return;
+  checkpoint();
+  for (const key of needs) {
+    const name = shopName(key);
+    let it = matchExact(name, state.items)?.item || state.items.find((i) => !NOT_FOOD.test(i.name) && dinnerMatches(i.name, key));
+    if (!it) {
+      it = newItem({ name, qty: 0, location: guessLocation(name), listOnly: true });
+      state.items.push(it);
+    }
+    it.need = true;
+    it.updated = Date.now();
+    ui.bought.delete(it.id);
+  }
+  save();
+  toast(`Added ${needs.length} to the shopping list`, { undo: true });
+}
+
+$('#main').addEventListener('click', (e) => {
+  if (ui.view !== 'cook' || ui.editor || ui.paste || ui.account) return;
+  const el = e.target.closest('[data-cook-mode], [data-dinner], [data-dinner-max], [data-dinner-open], [data-dinner-swap]');
+  if (!el) return;
+  const c = cookPrefs();
+  const d = c.dinners;
+  const { cookMode, dinner, dinnerMax, dinnerOpen, dinnerSwap } = el.dataset;
+  if (dinner === 'list') return listDinnerNeeds();
+  if (cookMode) c.mode = cookMode;
+  else if (dinnerOpen) {
+    const i = Number(dinnerOpen);
+    if (!ui.dinnerOpen.delete(i)) ui.dinnerOpen.add(i);
+    return render();
+  } else if (dinnerSwap) {
+    const i = Number(dinnerSwap);
+    const date = dateIn(i);
+    if (!ui.dinnerSeen.has(date)) ui.dinnerSeen.set(date, new Set());
+    const id = swapDinner(d.ids, i, dinnerStock(), d, ui.dinnerSeen.get(date));
+    if (!id) return toast('No other dinners fit these filters');
+    d.ids[i] = id;
+    ui.dinnerOpen.delete(i);
+  } else {
+    // A filter or a fresh start: plan the whole week again.
+    if (dinnerMax) d.max = Number(dinnerMax);
+    if (dinner === 'veg') d.veg = !d.veg;
+    if (dinner === 'new') d.seed = Math.floor(Math.random() * 1e9);
+    d.ids = [];
+    ui.dinnerSeen.clear();
+  }
+  savePrefs();
+  render();
+});
+
+// ---------- Recipe ideas ----------
 
 // Picked items you still have.
 function cookPicked() {
@@ -800,17 +946,18 @@ function cookPicked() {
 
 function renderCook() {
   const c = cookPrefs();
+  if (c.mode === 'dinners') return cookModes(c) + renderDinners();
   const picked = new Set(cookPicked());
   const have = state.items.filter((i) => i.qty > 0 && !NOT_FOOD.test(i.name));
   if (!have.length) {
-    return `<div class="empty"><div class="big">🍳</div><h2>Nothing in stock yet</h2>
+    return `${cookModes(c)}<div class="empty"><div class="big">🍳</div><h2>Nothing in stock yet</h2>
       <p>Once you’ve added what’s in your kitchen, pick ingredients here to get recipe ideas.</p></div>`;
   }
   const kitchen = allLocations().filter((pl) => KITCHEN.includes(pl));
   const others = allLocations().filter((pl) => !KITCHEN.includes(pl) && have.some((i) => shownIn(i).includes(pl)));
   const soon = have.filter(useSoon);
   const cuisines = CUISINES.includes(c.cuisine) ? CUISINES : [...CUISINES, c.cuisine];
-  let html = `<p class="note" style="margin:4px 4px 0">Choose what you’re making and tick what to cook with, then ask Claude or copy the question for any recipe app.</p>
+  let html = `${cookModes(c)}<p class="note" style="margin:12px 4px 0">Choose what you’re making and tick what to cook with, then ask Claude or copy the question for any recipe app.</p>
     <div class="card form cook-options cook-what">
       <h3>What are you making?</h3>
       <div class="row2">
