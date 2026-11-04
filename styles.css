@@ -615,6 +615,9 @@ body { font-variant-numeric: lining-nums; }
   margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); font-size: 14px;
 }
 .dinner-sum .note { margin: 0; }
+.dinner-better { margin-top: 12px; border-color: var(--gold); }
+.dinner-better p { margin: 0; color: var(--ink); }
+.dinner-better .row-actions .btn { min-height: 40px; }
 .dinner-list { margin-top: 14px; }
 .dinner { border-top: 1px solid var(--line); }
 .dinner:first-child { border-top: 0; }
@@ -633,7 +636,7 @@ body { font-variant-numeric: lining-nums; }
 .dinner-ing { list-style: none; margin: 0; padding: 0; }
 .dinner-ing li { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; padding: 3px 0; }
 .dinner-ing small { flex: none; font-size: 12px; font-weight: 600; color: var(--warn); }
-.dinner-ing li.have small { font-weight: 500; color: var(--muted); }
+.dinner-ing li.have small, .dinner-ing li.opt small { font-weight: 500; color: var(--muted); }
 .dinner-body ol { margin: 0; padding-left: 18px; }
 .dinner-body ol li + li { margin-top: 4px; }
 .dinner-tip { margin: 12px 0 0; padding: 10px 12px; border-radius: 10px; background: var(--warn-soft); }

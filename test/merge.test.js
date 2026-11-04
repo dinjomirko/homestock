@@ -92,6 +92,18 @@ test('settings: a store added here and a place added there both stay', () => {
   });
 });
 
+test('settings: the dinner plan is never mixed; changed on both sides, the newer one wins whole', () => {
+  const plan = (ids, updated) => ({ start: '2026-11-03', ids, seed: 1, max: 30, veg: false, updated });
+  const base = { stores: ['Costco'], dinners: plan(['spag', 'ques', 'rice'], 1) };
+  const here = plan(['spag', 'soup', 'rice'], 5); // swapped night 2 here
+  const there = plan(['eggs', 'ques', 'rice'], 9); // swapped night 1 there, later
+  assert.deepEqual(mergeSettings(base, { ...base, dinners: here }, { ...base, dinners: there }).dinners, there);
+  assert.deepEqual(mergeSettings(base, { ...base, dinners: there }, { ...base, dinners: here }).dinners, there);
+  // Only one side changed it: that side's, whatever the other side's other settings did.
+  const out = mergeSettings(base, { ...base, dinners: here }, { ...base, stores: ['Costco', 'Aldi'] });
+  assert.deepEqual(out, { stores: ['Costco', 'Aldi'], dinners: here });
+});
+
 test('settings: spots added on both sides in the same place', () => {
   const base = { subPlaces: { Garage: ['Shelf 1'] } };
   const out = mergeSettings(base, { subPlaces: { Garage: ['Shelf 1', 'Shelf 2'] } }, { subPlaces: { Garage: ['Shelf 1', 'Workbench'] } });

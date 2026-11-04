@@ -90,7 +90,11 @@ export function mergeList(b = [], l = [], r = []) {
   return out;
 }
 
-// Shared settings: stores, places, spots in each place, rooms.
+// Spots in each place: { Garage: ['Shelf 1', …] }, merged place by place.
+const isListMap = (v) => isObj(v) && Object.values(v).every(Array.isArray);
+
+// Shared settings: stores, places, spots in each place, rooms, and the dinner plan. A setting
+// that's one whole value (the dinner plan) isn't mixed: both changed, the more recent edit wins.
 export function mergeSettings(base, local, remote) {
   const out = { ...remote };
   for (const k of new Set([...Object.keys(local || {}), ...Object.keys(remote || {})])) {
@@ -100,13 +104,13 @@ export function mergeSettings(base, local, remote) {
     if (base && print(l) === print(b)) continue; // only the household's side changed
     if (r === undefined || (base && print(r) === print(b))) out[k] = l;
     else if (Array.isArray(l) && Array.isArray(r)) out[k] = mergeList(Array.isArray(b) ? b : [], l, r);
-    else if (isObj(l) && isObj(r)) {
+    else if (isListMap(l) && isListMap(r)) {
       out[k] = {};
       for (const key of new Set([...Object.keys(l), ...Object.keys(r)])) {
         const merged = mergeList(isObj(b) && Array.isArray(b[key]) ? b[key] : [], l[key] || [], r[key] || []);
         if (merged.length) out[k][key] = merged;
       }
-    } else out[k] = l;
+    } else out[k] = isObj(l) && isObj(r) ? newest(l, r) : l;
   }
   return out;
 }

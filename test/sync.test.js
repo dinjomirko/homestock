@@ -260,6 +260,35 @@ test('a store added on one phone and a place on the other: both stay', async () 
   }
 });
 
+const plan = (ids, updated = 0) => ({ start: '2026-11-03', ids, seed: 1, max: 30, veg: false, updated });
+
+test('a dinner plan made on one phone, and a swap there, show up on the other', async () => {
+  const server = household();
+  const a = await phone(server, 'ann');
+  const b = await phone(server, 'bob');
+  await a.change((p) => (p.settings = { ...p.settings, dinners: plan(['spag', 'ques', 'rice']) }));
+  assert.deepEqual(b.settings.dinners, plan(['spag', 'ques', 'rice']));
+  await b.change((p) => (p.settings = { ...p.settings, dinners: plan(['spag', 'soup', 'rice'], 5) }));
+  assert.deepEqual(a.settings.dinners.ids, ['spag', 'soup', 'rice']);
+});
+
+test('both phones change the dinner plan while one is offline: the newer change wins whole', async () => {
+  const server = household();
+  const a = await phone(server, 'ann');
+  const b = await phone(server, 'bob');
+  await a.change((p) => (p.settings = { ...p.settings, dinners: plan(['spag', 'ques', 'rice']) }));
+  a.client.online = false;
+  await b.change((p) => (p.settings = { ...p.settings, dinners: plan(['eggs', 'ques', 'rice'], 9) }));
+  await a.change((p) => (p.settings = { ...p.settings, stores: [...p.settings.stores, 'Aldi'], dinners: plan(['spag', 'soup', 'rice'], 5) }));
+  a.client.online = true;
+  await a.sync._testNow.pull();
+  await settle();
+  for (const p of [a, b]) {
+    assert.deepEqual(p.settings.dinners, plan(['eggs', 'ques', 'rice'], 9), `${p.name}: plan`);
+    assert.deepEqual(p.settings.stores, ['Costco', 'Aldi'], `${p.name}: stores`);
+  }
+});
+
 test('three phones all changing the same item at once', async () => {
   const server = household();
   const a = await phone(server, 'ann', { items: [{ ...tomatoes, qty: 10 }] });

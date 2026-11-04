@@ -1,15 +1,16 @@
 import {
   parseCommand, resolveActions, matchItem, matchExact, guessLocation, guessEmoji, parsePack, parseListLines,
   suggestShelfLife, openLife, isoDate, DEFAULT_LOCATIONS,
-} from './parser.js?v=41';
+} from './parser.js?v=42';
 import {
   initSync, pushSoon, syncInfo, createHousehold, joinHousehold, leaveHousehold, authenticate, useHousehold, signOut,
   removeMember, newJoinCode, renameMe,
-} from './sync.js?v=41';
-import { mergeItem, slim } from './merge.js?v=41';
+} from './sync.js?v=42';
+import { mergeItem, slim } from './merge.js?v=42';
 import {
-  dinnerById, matches as dinnerMatches, shopName, seeded, dinnerPool, allocate, extendPlan, swapDinner, goingOff, PLAN_DAYS,
-} from './dinners.js?v=41';
+  dinnerById, matches as dinnerMatches, shopName, seeded, dinnerPool, allocate, extendPlan, planWeek, swapDinner, goingOff,
+  needed, inStock as haveFor, stockKey, PLAN_DAYS,
+} from './dinners.js?v=42';
 
 const APP_VERSION = new URL(import.meta.url).searchParams.get('v') || 'dev';
 const STORAGE_KEY = 'homestock.v1';
@@ -795,7 +796,6 @@ function cookPrefs() {
   const c = (prefs.cook ??= {});
   const defaults = {
     picked: [], meal: 'Any meal', cuisine: 'Any cuisine', servings: 2, extras: true, notes: '', others: false, mode: 'dinners',
-    dinners: { start: '', ids: [], seed: 1, max: 30, veg: false },
   };
   for (const [k, v] of Object.entries(defaults)) c[k] ??= v;
   return c;
@@ -810,68 +810,110 @@ const cookModes = (c) => {
 // The next seven dinners for two adults and two toddlers, using what's in stock first (dinners.js
 // does the choosing). It rolls on by itself: each new day drops the dinners that have passed and
 // plans one more at the end, so tonight is always first and the week ahead is always planned.
+// Once the stock changes enough that a different plan would use more of it, it offers to re-plan.
 
-const dinnerStock = () => state.items.filter((i) => i.qty > 0 && !NOT_FOOD.test(i.name)).map((i) => ({ id: i.id, name: i.name, qty: i.qty, days: daysLeft(i) }));
+// The plan is shared with the household: { start, ids, seed, max, veg, updated, pinned, stockKey }.
+// `updated` is when someone last changed it by hand (a swap, a filter), so when two phones change
+// it at once the newer change wins; planning on its own leaves it alone. `pinned`: the dates of
+// dinners someone swapped in, which a re-plan keeps. `stockKey`: the food in stock when the plan
+// was made or last kept. Filled in place, like cookPrefs().
+function dinnerPrefs() {
+  // Version 41 kept the plan with this phone's Recipes settings.
+  if (prefs.cook?.dinners) {
+    prefs.dinners ??= prefs.cook.dinners;
+    delete prefs.cook.dinners;
+  }
+  const d = (prefs.dinners ??= { start: '', ids: [], seed: 1, max: 30, veg: false, updated: 0 });
+  d.pinned ??= [];
+  return d;
+}
+
+const dinnerStock = () => state.items.filter((i) => i.qty > 0 && !NOT_FOOD.test(i.name)).map((i) => ({ id: i.id, name: i.name, qty: i.qty, unit: i.unit || '', days: daysLeft(i) }));
 const daysBetween = (a, b) => Math.round((new Date(b + 'T00:00') - new Date(a + 'T00:00')) / 864e5);
-const onTheList = (key) => state.items.some((i) => isLow(i) && dinnerMatches(i.name, key));
-// What the plan still needs to buy, as recipe keys, leaving out what's already on the list.
-const dinnerNeeds = (plan) => [...new Set(plan.flat().filter((x) => !x.item).map((x) => x.key))].filter((k) => !onTheList(k));
+const dinnerSeed = (d) => seeded(d.seed + daysBetween('2000-01-01', todayIso()));
+const onTheList = (food) => state.items.some((i) => isLow(i) && dinnerMatches(i.name, food));
+// What the plan still needs to buy, as foods, leaving out what's optional or already on the list.
+const dinnerNeeds = (plan) => [...new Set(plan.flatMap(needed).filter((x) => !x.item || x.short).map((x) => x.food))].filter((f) => !onTheList(f));
+const plannedInStock = (ids, stock) => allocate(ids, stock).reduce((n, rows) => n + haveFor(rows), 0);
 
 function dinnerPlan(stock) {
-  const d = cookPrefs().dinners;
+  const d = dinnerPrefs();
   const today = todayIso();
   const shift = d.start ? daysBetween(d.start, today) : PLAN_DAYS;
   const pool = dinnerPool(d);
   let keep = shift >= 0 && shift < PLAN_DAYS ? d.ids.slice(shift) : [];
   if (!keep.every((id) => pool.includes(id))) keep = [];
   if (shift || keep.length < PLAN_DAYS) {
-    const ids = extendPlan(keep, stock, d, seeded(d.seed + daysBetween('2000-01-01', today)));
+    const ids = extendPlan(keep, stock, d, dinnerSeed(d));
     if (shift || String(ids) !== String(d.ids)) {
-      Object.assign(d, { start: today, ids });
+      Object.assign(d, { start: today, ids, stockKey: stockKey(stock), pinned: d.pinned.filter((date) => date >= today) });
       ui.dinnerOpen.clear();
-      writePrefs();
+      savePrefs(); // the other phones get the same plan rather than working out their own
     }
   }
   return d.ids;
 }
 
+// A plan for the stock as it is now, keeping tonight and the dinners someone swapped in: offered
+// once the stock has changed since the plan was made, if it uses at least two more things you have.
+function betterDinners(stock) {
+  const d = dinnerPrefs();
+  if (d.stockKey === stockKey(stock)) return null;
+  const ids = planWeek(d.ids.map((id, i) => (i === 0 || d.pinned.includes(dateIn(i)) ? id : null)), stock, d, dinnerSeed(d));
+  const gain = plannedInStock(ids, stock) - plannedInStock(d.ids, stock);
+  return gain >= 2 ? { ids, gain } : null;
+}
+
+function ingredientStatus(x, night) {
+  if (x.item && !x.short) return 'In stock';
+  if (x.short) return 'Not enough';
+  if (x.stale) return night ? 'Past its date by then' : 'Yours is past its date';
+  if (x.opt) return 'Optional';
+  return onTheList(x.food) ? 'On the list' : 'To buy';
+}
+
 function renderDinners() {
-  const d = cookPrefs().dinners;
+  const d = dinnerPrefs();
   const stock = dinnerStock();
   const ids = dinnerPlan(stock);
   const plan = allocate(ids, stock);
-  const rows = plan.flat();
+  const have = plan.reduce((n, rows) => n + haveFor(rows), 0);
+  const total = plan.reduce((n, rows) => n + needed(rows).length, 0);
   const needs = dinnerNeeds(plan);
-  const anyMissing = rows.some((x) => !x.item);
+  const better = betterDinners(stock);
   const chip = (on, attr, label) => `<button class="chip ${on ? 'on' : ''}" ${attr} aria-pressed="${on}">${label}</button>`;
   let html = `<div class="card dinner-head">
       <h3>Next ${ids.length} dinners</h3>
       <p>Quick, healthy dinners for 2 adults and 2 toddlers, made from what you have first.</p>
       <div class="chips">${chip(d.max === 20, 'data-dinner-max="20"', 'Up to 20 min')}${chip(d.max === 30, 'data-dinner-max="30"', 'Up to 30 min')}${chip(d.veg, 'data-dinner="veg"', 'Meatless')}</div>
       <div class="dinner-sum">
-        <span><b>${rows.filter((x) => x.item).length} of ${rows.length}</b> ingredients in stock</span>
-        ${needs.length ? `<button class="btn small primary" data-dinner="list">Add ${needs.length} to the list</button>` : anyMissing ? '<span class="note">The rest is on the shopping list</span>' : ''}
+        <span><b>${have} of ${total}</b> ingredients in stock</span>
+        ${needs.length ? `<button class="btn small primary" data-dinner="list">Add ${needs.length} to the list</button>` : have < total ? '<span class="note">The rest is on the shopping list</span>' : ''}
       </div>
     </div>
+    ${better ? `<div class="card dinner-better" role="status">
+      <p><b>Your stock has changed.</b> A new plan would use ${better.gain} more things you already have. Tonight and any dinners you swapped in stay.</p>
+      <div class="row-actions"><button class="btn small" data-dinner="keep">Keep this plan</button><button class="btn small primary" data-dinner="replan">Re-plan</button></div>
+    </div>` : ''}
     <ul class="list dinner-list">`;
   plan.forEach((ing, i) => {
     const r = dinnerById[ids[i]];
     const day = new Date(dateIn(i) + 'T00:00');
     const open = ui.dinnerOpen.has(i);
-    const soon = [...new Set(ing.filter((x) => goingOff(x.item, i) != null).map((x) => x.item.name.toLowerCase()))];
+    const soon = [...new Set(ing.filter((x) => !x.short && goingOff(x.item, i) != null).map((x) => x.item.name.toLowerCase()))];
     const when = i === 0 ? 'Tonight' : i === 1 ? 'Tomorrow' : day.toLocaleDateString(undefined, { weekday: 'long' });
     html += `<li class="dinner ${i === 0 ? 'tonight' : ''}">
       <div class="dinner-top">
         <button class="dinner-open" data-dinner-open="${i}" aria-expanded="${open}">
           <span class="dinner-day"><small>${day.toLocaleDateString(undefined, { weekday: 'short' })}</small><b>${day.getDate()}</b></span>
           <span class="info"><span class="name">${esc(r.name)}</span>
-            <span class="meta">${i === 0 ? 'Tonight · ' : ''}${r.min} min · ${ing.filter((x) => x.item).length} of ${ing.length} in stock${soon.map((n) => ` · <span class="warn">Uses up ${esc(n)}</span>`).join('')}</span></span>
+            <span class="meta">${i === 0 ? 'Tonight · ' : ''}${r.min} min · ${haveFor(ing)} of ${needed(ing).length} in stock${soon.map((n) => ` · <span class="warn">Uses up ${esc(n)}</span>`).join('')}</span></span>
         </button>
         <button class="btn small" data-dinner-swap="${i}" aria-label="Swap ${esc(when.toLowerCase())}’s dinner">Swap</button>
       </div>
       ${open ? `<div class="dinner-body">
         <h4>Ingredients</h4>
-        <ul class="dinner-ing">${ing.map((x) => `<li class="${x.item ? 'have' : ''}"><span>${esc(x.label)}</span><small>${x.item ? 'In stock' : x.stale ? (i ? 'Past its date by then' : 'Yours is past its date') : onTheList(x.key) ? 'On the list' : 'To buy'}</small></li>`).join('')}</ul>
+        <ul class="dinner-ing">${ing.map((x) => `<li class="${x.item && !x.short ? 'have' : x.opt && !x.item ? 'opt' : ''}"><span>${esc(x.label)}</span><small>${ingredientStatus(x, i)}</small></li>`).join('')}</ul>
         <h4>Steps</h4>
         <ol>${r.steps.map((s) => `<li>${esc(s)}</li>`).join('')}</ol>
         <p class="dinner-tip"><b>For the toddlers</b>${esc(r.tod)}</p>
@@ -881,16 +923,16 @@ function renderDinners() {
   return `${html}</ul><button class="link small dinner-new" data-dinner="new">Plan different dinners</button>`;
 }
 
-// Puts what the plan still needs on the shopping list: something you've run out of goes back on
-// it, anything new goes on as list-only.
+// Puts what the plan still needs on the shopping list: something you've run out of or are short
+// of goes back on it, anything new goes on as list-only.
 function listDinnerNeeds() {
   const stock = dinnerStock();
-  const needs = dinnerNeeds(allocate(cookPrefs().dinners.ids, stock));
+  const needs = dinnerNeeds(allocate(dinnerPrefs().ids, stock));
   if (!needs.length) return;
   checkpoint();
-  for (const key of needs) {
-    const name = shopName(key);
-    let it = matchExact(name, state.items)?.item || state.items.find((i) => !NOT_FOOD.test(i.name) && dinnerMatches(i.name, key));
+  for (const food of needs) {
+    const name = shopName(food);
+    let it = matchExact(name, state.items)?.item || state.items.find((i) => !NOT_FOOD.test(i.name) && dinnerMatches(i.name, food));
     if (!it) {
       it = newItem({ name, qty: 0, location: guessLocation(name), listOnly: true });
       state.items.push(it);
@@ -908,7 +950,7 @@ $('#main').addEventListener('click', (e) => {
   const el = e.target.closest('[data-cook-mode], [data-dinner], [data-dinner-max], [data-dinner-open], [data-dinner-swap]');
   if (!el) return;
   const c = cookPrefs();
-  const d = c.dinners;
+  const d = dinnerPrefs();
   const { cookMode, dinner, dinnerMax, dinnerOpen, dinnerSwap } = el.dataset;
   if (dinner === 'list') return listDinnerNeeds();
   if (cookMode) c.mode = cookMode;
@@ -923,13 +965,26 @@ $('#main').addEventListener('click', (e) => {
     const id = swapDinner(d.ids, i, dinnerStock(), d, ui.dinnerSeen.get(date));
     if (!id) return toast('No other dinners fit these filters');
     d.ids[i] = id;
+    if (!d.pinned.includes(date)) d.pinned.push(date);
+    d.updated = Date.now();
     ui.dinnerOpen.delete(i);
+  } else if (dinner === 'replan' || dinner === 'keep') {
+    const stock = dinnerStock();
+    const better = dinner === 'replan' && betterDinners(stock);
+    if (better) {
+      d.ids = better.ids;
+      d.updated = Date.now();
+      ui.dinnerOpen.clear();
+    }
+    d.stockKey = stockKey(stock);
   } else {
     // A filter or a fresh start: plan the whole week again.
     if (dinnerMax) d.max = Number(dinnerMax);
     if (dinner === 'veg') d.veg = !d.veg;
     if (dinner === 'new') d.seed = Math.floor(Math.random() * 1e9);
     d.ids = [];
+    d.pinned = [];
+    d.updated = Date.now();
     ui.dinnerSeen.clear();
   }
   savePrefs();
@@ -4787,8 +4842,12 @@ if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.
   navigator.serviceWorker.register('sw.js').catch(() => {});
 }
 
-// What's shared with the household besides the items: the lists of stores, places, spots and rooms.
-const sharedSettings = () => ({ stores: prefs.stores, places: prefs.places, subPlaces: prefs.subPlaces, rooms: prefs.rooms });
+// What's shared with the household besides the items: the lists of stores, places, spots and
+// rooms, and the dinner plan once there is one.
+const sharedSettings = () => {
+  const d = dinnerPrefs();
+  return { stores: prefs.stores, places: prefs.places, subPlaces: prefs.subPlaces, rooms: prefs.rooms, ...(d.ids.length ? { dinners: d } : {}) };
+};
 
 // Offline (or out of the household) shows next to the title; changes stay safe on this phone.
 function showSyncStatus(status) {
@@ -4856,6 +4915,7 @@ Promise.race([
       if (Array.isArray(data.places)) prefs.places = data.places;
       if (data.subPlaces && typeof data.subPlaces === 'object') prefs.subPlaces = data.subPlaces;
       if (Array.isArray(data.rooms)) prefs.rooms = data.rooms;
+      if (Array.isArray(data.dinners?.ids)) prefs.dinners = JSON.parse(JSON.stringify(data.dinners));
       writePrefs();
     },
     persist: persistOnly,

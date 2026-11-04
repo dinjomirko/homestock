@@ -6,8 +6,8 @@
 // base — and only writes when the household's copy is still that one. If someone else changed it
 // in the meantime, the two are merged (merge.js) and written again, so both people's changes
 // count. Deleting something someone else has since changed keeps their version.
-import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js?v=41';
-import { slim, fingerprint, print, mergeItem, mergeSettings, newest } from './merge.js?v=41';
+import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js?v=42';
+import { slim, fingerprint, print, mergeItem, mergeSettings, newest } from './merge.js?v=42';
 
 const LIB = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm';
 const META_KEY = 'homestock.sync';
